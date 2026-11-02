@@ -244,3 +244,22 @@ def test_known_sha_means_size_check_only(tmp_path, monkeypatch):
     assert fp["sha256"] == "ab" * 32 and fp["sha256_measured"] is False and fp["sha256_measured_at"] == "t0"
     with pytest.raises(RuntimeError, match="크기"):
         lm.model_file_fingerprint({"model_file": "m.gguf", "model_file_bytes": 9, "model_file_sha256": "ab" * 32})
+
+
+GUARD4 = {**GUARD, "stop_pressure_level": 4}
+
+
+def test_stop_only_at_level_4_or_swap_growth():
+    assert lm.problems_while_running(_mem(pressure=2), GUARD4, 1.0) == []
+    assert lm.problems_while_running(_mem(pressure=3), GUARD4, 1.0) == []
+    assert "압박 단계 4" in lm.problems_while_running(_mem(pressure=4), GUARD4, 1.0)[0]
+    assert "스왑" in lm.problems_while_running(_mem(swap_used=2.1), GUARD4, 1.0)[0]
+    assert lm.problems_before_load(_mem(pressure=2), LM, GUARD4)  # 로드 전 기준은 그대로 단계 1
+
+
+def test_preflight_records_warning_without_stopping(fake):
+    fake([{"identifier": LM["identifier"]}], mem={**_mem(pressure=2, swap_used=1.2), "compressor_gib": 7.0})
+    snap = lm.preflight(LM["identifier"], GUARD4, 1.0)()
+    assert snap["pressure_level"] == 2 and "기록만" in snap["warning"] and round(snap["swap_increase_gib"], 2) == 0.2
+    fake([{"identifier": LM["identifier"]}], mem={**_mem(), "compressor_gib": 4.0})
+    assert "warning" not in lm.preflight(LM["identifier"], GUARD4, 1.0)()

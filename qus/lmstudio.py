@@ -140,7 +140,15 @@ def problems_before_load(mem: dict, lm_cfg: dict, guard: dict) -> list[str]:
 
 
 def problems_while_running(mem: dict, guard: dict, swap_baseline_gib: float) -> list[str]:
-    out = _pressure_problem(mem, guard)
+    """실행 중(로드 직후, 매 호출 전) 멈춤 조건: 압박 단계 ≥ stop_pressure_level, 또는 스왑 증가 > max_swap_increase_gib.
+
+    stop_pressure_level이 없으면 로드 전 기준(max_pressure_level 초과)을 그대로 쓴다.
+    """
+    stop = guard.get("stop_pressure_level")
+    if stop is None:
+        out = _pressure_problem(mem, guard)
+    else:
+        out = [f"메모리 압박 단계 {mem['pressure_level']} ≥ {stop}"] if mem["pressure_level"] >= stop else []
     grown = mem["swap_used_gib"] - swap_baseline_gib
     if grown > guard["max_swap_increase_gib"]:
         out.append(f"스왑 사용량이 로드 직전보다 {grown:.2f} GiB 늘었다 (> {guard['max_swap_increase_gib']})")
@@ -148,14 +156,23 @@ def problems_while_running(mem: dict, guard: dict, swap_baseline_gib: float) -> 
 
 
 def preflight(identifier: str, guard: dict, swap_baseline_gib: float):
-    """매 호출 직전 확인: identifier가 로드돼 있고, 압박 단계 정상, 스왑 증가가 기준 이하일 것."""
-    def check() -> None:
+    """매 호출 직전 확인: identifier가 로드돼 있고, 멈춤 조건(problems_while_running)에 걸리지 않을 것.
+
+    멈추지 않는 압박(단계 2·3 등)은 돌려주는 측정값의 warning에 남긴다. 클라이언트가 응답 기록에 붙인다.
+    """
+    def check() -> dict:
         if not _present(identifier, loaded_models()):
             raise ModelNotLoaded(f"'{identifier}'가 로드돼 있지 않다. JIT 로드를 피하려고 호출하지 않고 멈춘다")
         snap = memory_snapshot()
         problems = problems_while_running(snap, guard, swap_baseline_gib)
         if problems:
             raise MemoryPressure("실행 중 메모리 압박: " + "; ".join(problems), snap)
+        snap["swap_increase_gib"] = snap["swap_used_gib"] - swap_baseline_gib
+        if snap["pressure_level"] > guard.get("max_pressure_level", 1):
+            snap["warning"] = f"메모리 압박 단계 {snap['pressure_level']} (멈춤 기준 미만, 기록만 함)"
+            print(f"  [lmstudio] 경고: {snap['warning']}, 가용 {snap['available_gib']:.2f} GiB, "
+                  f"압축 {snap['compressor_gib']:.2f} GiB, 스왑 +{snap['swap_increase_gib']:.2f} GiB")
+        return snap
     return check
 
 

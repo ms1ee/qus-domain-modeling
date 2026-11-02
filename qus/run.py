@@ -194,15 +194,18 @@ def _run_jobs(client_for, model_name, model_cfg, jobs, infos, session) -> None:
                       input=input_id, rep=rep,
                       config=config_name(), input_info=infos[(set_id, input_id)], prompt_templates=prompt_hashes(),
                       session=_session_meta(session), started_at=started, finished_at=_now(),
-                      aborted_attempts=_aborted_attempts(set_id, input_id, rep))
+                      aborted_attempts=_aborted_attempts(set_id, input_id, rep),
+                      previous_versions=_previous_versions(model_name, set_id, input_id, rep))
         _write_atomic(path, record)
         calls = record["calls"]
         cut = [t for t, c in calls.items() if c.get("truncated")]
+        warned = [t for t, c in calls.items() if (c["response"].get("preflight") or {}).get("warning")]
         print(f"  {model_name} {set_id} {input_id} rep{rep}: "
               f"classes={len(record['classes'] or [])} associations={len(record['associations'] or [])}"
               + "".join(f" {t}:{c['response']['output_tokens']}tok/{c['response']['elapsed_s'] or 0:.0f}s"
                         for t, c in calls.items())
-              + (f" 절단={cut}" if cut else "") + (f" error={record['error']}" if record["error"] else ""))
+              + (f" 절단={cut}" if cut else "") + (f" 압박경고={warned}" if warned else "")
+              + (f" error={record['error']}" if record["error"] else ""))
 
 
 def incomplete_path(model_name: str, set_id: str, input_id: str, rep: int, at: str):
@@ -247,6 +250,16 @@ def _aborted_attempts(set_id: str, input_id: str, rep: int) -> list[dict]:
                 r = {**r, "partial_record": recovered[r["at"]]["path"],
                      "partial_record_source": recovered[r["at"]]["source"]}
             out.append(r)
+    return out
+
+
+def _previous_versions(model_name: str, set_id: str, input_id: str, rep: int) -> list[dict]:
+    """runs/<run_name>/archive/ 로 옮긴 같은 실행의 이전 기록 (조건을 바꿔 다시 돌린 경우)."""
+    out = []
+    for path in sorted((runs_dir() / "archive").glob(f"*/{model_name}/{set_id}/{input_id}/rep{rep}.json")):
+        old = json.loads(path.read_text(encoding="utf-8"))
+        out.append({"path": str(path.relative_to(runs_dir())), "finished_at": old.get("finished_at"),
+                    "parallel": ((old.get("session") or {}).get("instance") or {}).get("parallel")})
     return out
 
 
@@ -301,7 +314,9 @@ def _print_lmstudio_plan(lm_cfg: dict) -> None:
           f"(필요 {need:.2f} = 파일 {lm_cfg['model_file_bytes'] / lmstudio.GIB:.2f}"
           f" + KV {lm_cfg['kv_bytes_per_token'] * lm_cfg['context_length'] / lmstudio.GIB:.2f}"
           f" + {guard['overhead_gib']}, 여기에 + {guard['extra_margin_gib']}), 압박 단계 {mem['pressure_level']}, "
-          f"스왑 사용 {mem['swap_used_gib']:.2f} GiB (실행 중 +{guard['max_swap_increase_gib']} 넘으면 멈춤)")
+          f"스왑 사용 {mem['swap_used_gib']:.2f} GiB\n"
+          f"  실행 중 멈춤: 압박 단계 ≥ {guard.get('stop_pressure_level', '(로드 전 기준과 같음)')} 또는 스왑 +{guard['max_swap_increase_gib']} GiB 초과"
+          f" (그보다 낮은 압박은 호출 기록에 남김)")
     problems = lmstudio.problems_before_load(mem, lm_cfg, guard)
     print("  → 지금 실행하면: " + ("로드 전 검사에서 멈춘다 — " + "; ".join(problems) if problems else "로드 전 검사 통과"))
 

@@ -219,3 +219,26 @@ def test_aborted_attempt_links_recovered_record(smoke):
     (a,) = runmod._aborted_attempts("school", "unambiguous", 3)
     assert a["partial_record"] == "incomplete/r.json" and a["partial_record_source"] == "LM Studio 서버 로그"
     assert runmod._aborted_attempts("school", "unambiguous", 2) == []
+
+
+def test_rerun_record_lists_archived_previous_version(smoke):
+    old = runmod.runs_dir() / "archive/2026-11-02-parallel4/mistral-7b-local/school/original/rep1.json"
+    old.parent.mkdir(parents=True)
+    old.write_text(json.dumps({"finished_at": "T0", "session": {"instance": {"parallel": 4}}}))
+
+    class Fine:
+        def __init__(self):
+            self.n = 0
+
+        def complete(self, prompt):
+            self.n += 1
+            return LLMResponse('{"classes": ["Student"]}' if self.n == 1 else '{"associations": []}',
+                               "fake", "stop", 1, 1, {})
+    fine = Fine()
+    job = ("mistral-7b-local", {}, "school", "original", 1)
+    runmod._run_jobs(lambda rep: fine, "mistral-7b-local", {}, [job], {("school", "original"): {}}, None)
+    rec = json.loads(runmod.run_path("mistral-7b-local", "school", "original", 1).read_text())
+    assert rec["previous_versions"] == [{"path": "archive/2026-11-02-parallel4/mistral-7b-local/school/original/rep1.json",
+                                         "finished_at": "T0", "parallel": 4}]
+    assert runmod.plan()  # archive 아래 기록은 완료로 치지 않는다
+    assert not runmod.run_path("mistral-7b-local", "school", "original", 2).exists()

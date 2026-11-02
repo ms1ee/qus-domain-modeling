@@ -36,6 +36,7 @@ class LLMResponse:
     request: dict | None = None  # 메시지를 뺀 요청 본문 (생성 파라미터)
     retries: int = 0
     retry_errors: list[str] = field(default_factory=list)
+    preflight: dict | None = None  # 호출 직전 확인 결과 (로컬 서버: 메모리 측정값, 압박 경고)
 
     @property
     def truncated(self) -> bool:
@@ -119,8 +120,7 @@ class OpenAICompatibleClient:
         payload = {**request, "messages": [{"role": "user", "content": prompt}]}
         errors = []
         while True:
-            if self.preflight:
-                self.preflight()
+            checked = self.preflight() if self.preflight else None
             start = time.perf_counter()
             try:
                 data = self._post(payload)
@@ -143,6 +143,7 @@ class OpenAICompatibleClient:
             request=request,
             retries=len(errors),
             retry_errors=errors,
+            preflight=checked,
         )
 
 

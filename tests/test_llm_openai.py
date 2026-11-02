@@ -96,3 +96,8 @@ def test_make_client_needs_no_api_key_for_local_server(monkeypatch):
            "timeout_s": 5, "lmstudio": {"identifier": "m"}, **PARAMS}
     client = make_client(cfg, preflight=print)
     assert isinstance(client, OpenAICompatibleClient) and client.preflight is print
+
+
+def test_preflight_result_is_kept_in_response(monkeypatch):
+    client, _ = _client(monkeypatch, OK, preflight=lambda: {"pressure_level": 2, "warning": "w"})
+    assert client.complete("p").preflight == {"pressure_level": 2, "warning": "w"}
