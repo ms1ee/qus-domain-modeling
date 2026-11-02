@@ -15,7 +15,7 @@ Pages occupied by compressor:                 583302.
 SWAP = "vm.swapusage: total = 3072.00M  used = 1654.12M  free = 1417.88M  (encrypted)"
 LM = {"model_key": "mistralai/mistral-7b-instruct-v0.3", "identifier": "smoke-mistral-7b-v0.3",
       "context_length": 8192, "ttl": 900, "model_file_bytes": 4372812000, "kv_bytes_per_token": 131072}
-GUARD = {"min_swap_free_gib": 2.0, "overhead_gib": 0.5, "max_pressure_level": 1}
+GUARD = {"overhead_gib": 0.5, "extra_margin_gib": 1.0, "max_pressure_level": 1, "max_swap_increase_gib": 1.0}
 OTHER = {"identifier": "qwen/qwen3-8b", "modelKey": "qwen/qwen3-8b", "contextLength": 8192}
 
 
@@ -27,19 +27,37 @@ def test_parse_vm_stat_and_swap():
     assert round(lm.parse_swapusage(SWAP)["swap_free_gib"], 2) == 1.38
 
 
-def test_required_memory_is_file_plus_kv_plus_overhead():
+def test_required_memory_is_file_plus_kv_plus_overhead_and_margin():
     assert round(lm.required_gib(LM, GUARD), 2) == 5.57
+    assert round(lm.threshold_gib(LM, GUARD), 2) == 6.57
 
 
-def _mem(available=8.0, swap_free=3.0, pressure=1):
-    return {"available_gib": available, "swap_free_gib": swap_free, "pressure_level": pressure}
+def _mem(available=8.0, swap_used=1.0, pressure=1, swap_free=0.5):
+    return {"available_gib": available, "swap_used_gib": swap_used, "swap_free_gib": swap_free,
+            "pressure_level": pressure}
 
 
-def test_memory_thresholds():
-    assert lm.problems_before_load(_mem(), LM, GUARD) == []
-    assert len(lm.problems_before_load(_mem(available=5.0, swap_free=1.4), LM, GUARD)) == 2
-    assert lm.problems_while_running(_mem(pressure=2), GUARD)
-    assert lm.problems_while_running(_mem(available=0.1), GUARD) == []  # 로드 후에는 가용량이 아니라 압박·스왑을 본다
+def test_memory_thresholds_before_load():
+    assert lm.problems_before_load(_mem(), LM, GUARD) == []  # 스왑 여유가 작아도 막지 않는다
+    assert lm.problems_before_load(_mem(available=6.6), LM, GUARD) == []
+    assert "6.57" in lm.problems_before_load(_mem(available=6.5), LM, GUARD)[0]
+    assert len(lm.problems_before_load(_mem(available=6.0, pressure=2), LM, GUARD)) == 2
+
+
+def test_memory_thresholds_while_running():
+    assert lm.problems_while_running(_mem(swap_used=1.9, available=0.1), GUARD, 1.0) == []
+    assert "스왑 사용량" in lm.problems_while_running(_mem(swap_used=2.1), GUARD, 1.0)[0]
+    assert "압박 단계 2" in lm.problems_while_running(_mem(pressure=2), GUARD, 1.0)[0]
+
+
+def test_model_file_fingerprint(tmp_path, monkeypatch):
+    monkeypatch.setattr(lm, "LMS_MODELS", tmp_path)
+    (tmp_path / "m.gguf").write_bytes(b"GGUF")
+    fp = lm.model_file_fingerprint({"model_file": "m.gguf", "model_file_bytes": 4})
+    import hashlib
+    assert fp["sha256"] == hashlib.sha256(b"GGUF").hexdigest() and fp["bytes"] == 4
+    with pytest.raises(RuntimeError, match="크기"):
+        lm.model_file_fingerprint({"model_file": "m.gguf", "model_file_bytes": 5})
 
 
 class FakeLMS:
@@ -67,12 +85,17 @@ def fake(monkeypatch):
         monkeypatch.setattr(lm, "loaded_models", lambda: list(f.loaded))
         monkeypatch.setattr(lm, "runtime_info", lambda: {"gguf_engine": "llama.cpp@x"})
         monkeypatch.setattr(lm, "memory_snapshot", lambda: dict(mem or _mem()))
+
+        def fingerprint(cfg):
+            f.commands.append(("sha256",))
+            return {"sha256": "x" * 64}
+        monkeypatch.setattr(lm, "model_file_fingerprint", fingerprint)
         return f
     return install
 
 
 def test_memory_below_threshold_stops_before_loading(fake):
-    f = fake([OTHER], mem=_mem(available=4.6, swap_free=1.38))
+    f = fake([OTHER], mem=_mem(available=6.2))
     closed = []
     with pytest.raises(lm.MemoryPressure, match="로드 전"):
         with lm.smoke_model(LM, GUARD, on_close=closed.append):
@@ -88,9 +111,10 @@ def test_loads_explicitly_and_unloads_only_ours_even_on_failure(fake):
             assert signal.getsignal(signal.SIGTERM) is lm._raise_terminated
             assert s["instance"]["identifier"] == "smoke-mistral-7b-v0.3"
             raise ValueError("실행 중 실패")
-    assert f.commands[0] == ("load", LM["model_key"], "--identifier", LM["identifier"], "-c", "8192",
+    assert f.commands[0] == ("sha256",)  # 메모리 검사 통과 후, 로드 전
+    assert f.commands[1] == ("load", LM["model_key"], "--identifier", LM["identifier"], "-c", "8192",
                              "--ttl", "900", "-y")
-    assert f.commands[1] == ("unload", LM["identifier"])
+    assert f.commands[2] == ("unload", LM["identifier"])
     assert f.loaded == [OTHER] and closed[0]["restored"] and "ValueError" in closed[0]["error"]
     assert signal.getsignal(signal.SIGTERM) is not lm._raise_terminated
 
@@ -110,7 +134,7 @@ def test_pressure_right_after_load_unloads_immediately(fake, monkeypatch):
     with pytest.raises(lm.MemoryPressure, match="로드 직후"):
         with lm.smoke_model(LM, GUARD):
             pytest.fail("본문까지 가면 안 된다")
-    assert [c[0] for c in f.commands] == ["load", "unload"] and f.loaded == []
+    assert [c[0] for c in f.commands] == ["sha256", "load", "unload"] and f.loaded == []
 
 
 def test_same_model_loaded_by_someone_else_is_used_and_left_loaded(fake):
@@ -118,7 +142,7 @@ def test_same_model_loaded_by_someone_else_is_used_and_left_loaded(fake):
     f = fake([theirs])
     with lm.smoke_model(LM, GUARD) as s:
         assert s["identifier"] == theirs["identifier"] and not s["loaded_by_us"]
-    assert f.commands == [] and f.loaded == [theirs]
+    assert f.commands == [("sha256",)] and f.loaded == [theirs]
 
 
 def test_same_model_with_other_context_length_stops(fake):
@@ -140,9 +164,12 @@ def test_leftover_identifier_is_not_touched(fake):
 def test_preflight(fake, monkeypatch):
     fake([OTHER])
     with pytest.raises(lm.ModelNotLoaded):
-        lm.preflight(LM["identifier"], GUARD)()
-    fake([OTHER, {"identifier": LM["identifier"]}], mem=_mem(swap_free=1.0))
-    with pytest.raises(lm.MemoryPressure):
-        lm.preflight(LM["identifier"], GUARD)()
+        lm.preflight(LM["identifier"], GUARD, 1.0)()
+    fake([OTHER, {"identifier": LM["identifier"]}], mem=_mem(swap_used=2.5))
+    with pytest.raises(lm.MemoryPressure, match="스왑"):
+        lm.preflight(LM["identifier"], GUARD, 1.0)()
+    fake([{"identifier": LM["identifier"]}], mem=_mem(pressure=2))
+    with pytest.raises(lm.MemoryPressure, match="압박"):
+        lm.preflight(LM["identifier"], GUARD, 1.0)()
     fake([{"identifier": LM["identifier"]}])
-    lm.preflight(LM["identifier"], GUARD)()
+    lm.preflight(LM["identifier"], GUARD, 1.0)()

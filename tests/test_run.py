@@ -136,11 +136,14 @@ def test_completed_run_is_written_atomically_and_skipped_next_time(smoke):
 
 def test_unset_generation_params_stop_before_manifest_and_model_load(smoke, monkeypatch):
     from qus import lmstudio
+    from qus.config import load_yaml
 
     def must_not_load(*a, **k):
         raise AssertionError("모델 로드를 시도하면 안 된다")
     monkeypatch.setattr(lmstudio, "smoke_model", must_not_load)
     monkeypatch.setattr(lmstudio, "lms", must_not_load)
+    cfg = {**load_yaml("smoke.yaml")["models"]["mistral-7b-local"], "temperature": None}
+    monkeypatch.setattr(runmod, "plan", lambda inputs=None: [("mistral-7b-local", cfg, "school", "original", 1)])
     with pytest.raises(ValueError, match="TODO"):
         runmod.run()
     assert not (runmod.runs_dir() / "manifest.json").exists()
@@ -151,10 +154,11 @@ def test_dry_run_writes_nothing(smoke, monkeypatch, capsys):
 
     monkeypatch.setattr(lmstudio, "loaded_models", lambda: [])
     monkeypatch.setattr(lmstudio, "memory_snapshot",
-                        lambda: {"available_gib": 6.0, "swap_free_gib": 3.0, "pressure_level": 1})
+                        lambda: {"available_gib": 7.0, "swap_used_gib": 1.0, "pressure_level": 1})
     runmod.run(dry_run=True)
     out = capsys.readouterr().out
-    assert "18개 남음 (호출 최대 36회)" in out and "로드 전 검사 통과" in out and "TODO" in out
+    assert "18개 남음 (호출 최대 36회)" in out and "로드 전 검사 통과" in out and "TODO" not in out
+    assert "'temperature': 0.7" in out and "'seed': [1, 2, 3]" in out and "top_k" in out
     assert not runmod.runs_dir().exists()
 
 

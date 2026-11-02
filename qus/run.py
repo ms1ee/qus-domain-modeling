@@ -161,7 +161,7 @@ def _run_model(model_name: str, model_cfg: dict, jobs: list[tuple], infos: dict)
 
     guard = experiment_config()["memory_guard"]
     with lmstudio.smoke_model(lm_cfg, guard, on_close=lambda s: _append_jsonl("sessions.jsonl", s)) as session:
-        check = lmstudio.preflight(session["identifier"], guard)
+        check = lmstudio.preflight(session["identifier"], guard, session["swap_baseline_gib"])
         _run_jobs(lambda rep: make_client({**rep_model_config(model_cfg, rep), "model": session["identifier"]},
                                           preflight=check),
                   model_name, model_cfg, jobs, infos, session)
@@ -170,8 +170,8 @@ def _run_model(model_name: str, model_cfg: dict, jobs: list[tuple], infos: dict)
 def _session_meta(session: dict | None) -> dict | None:
     if not session:
         return None
-    keys = ("identifier", "model_key", "loaded_by_us", "load_options", "instance", "runtime",
-            "memory_before_load", "memory_after_load", "started_at")
+    keys = ("identifier", "model_key", "loaded_by_us", "load_options", "instance", "runtime", "model_file",
+            "memory_before_load", "memory_after_load", "swap_baseline_gib", "started_at")
     meta = {k: session.get(k) for k in keys}
     meta["runtime"] = {k: v for k, v in (meta["runtime"] or {}).items() if k != "runtime_ls"}
     return meta
@@ -247,12 +247,14 @@ def _print_lmstudio_plan(lm_cfg: dict) -> None:
     print(f"  지금 로드된 모델 (lms ps): {[m.get('identifier') for m in before] or '없음'}")
     if any(m.get("modelKey") == lm_cfg["model_key"] for m in before):
         print("  → 같은 모델 키가 이미 로드돼 있다: 새로 로드하지 않고 그대로 쓰며 끝나도 언로드하지 않는다")
+    print(f"  보내지 않는 샘플러 (LM Studio 기본값, 값 미확인): {lm_cfg.get('unsent_samplers')}")
     mem = lmstudio.memory_snapshot()
     need = lmstudio.required_gib(lm_cfg, guard)
-    print(f"  메모리 지금: 즉시 가용 {mem['available_gib']:.2f} GiB (필요 {need:.2f} GiB = 파일 "
-          f"{lm_cfg['model_file_bytes'] / lmstudio.GIB:.2f} + KV {lm_cfg['kv_bytes_per_token'] * lm_cfg['context_length'] / lmstudio.GIB:.2f}"
-          f" + 여유 {guard['overhead_gib']}), 스왑 여유 {mem['swap_free_gib']:.2f} GiB (기준 {guard['min_swap_free_gib']}), "
-          f"압박 단계 {mem['pressure_level']}")
+    print(f"  메모리 지금: 즉시 가용 {mem['available_gib']:.2f} GiB, 기준 {lmstudio.threshold_gib(lm_cfg, guard):.2f} GiB "
+          f"(필요 {need:.2f} = 파일 {lm_cfg['model_file_bytes'] / lmstudio.GIB:.2f}"
+          f" + KV {lm_cfg['kv_bytes_per_token'] * lm_cfg['context_length'] / lmstudio.GIB:.2f}"
+          f" + {guard['overhead_gib']}, 여기에 + {guard['extra_margin_gib']}), 압박 단계 {mem['pressure_level']}, "
+          f"스왑 사용 {mem['swap_used_gib']:.2f} GiB (실행 중 +{guard['max_swap_increase_gib']} 넘으면 멈춤)")
     problems = lmstudio.problems_before_load(mem, lm_cfg, guard)
     print("  → 지금 실행하면: " + ("로드 전 검사에서 멈춘다 — " + "; ".join(problems) if problems else "로드 전 검사 통과"))
 

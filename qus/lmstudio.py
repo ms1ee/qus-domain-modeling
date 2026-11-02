@@ -6,11 +6,16 @@
   모델 키와 다른 identifier를 쓰면, 도중에 언로드됐을 때 요청이 JIT 로드를 일으키지 않고 오류로 끝난다
 - 로드·언로드는 이 identifier에만 한다. `lms unload --all`은 쓰지 않는다
 - 같은 모델 키가 이미 (다른 identifier로) 로드돼 있으면 새로 로드하지 않고 그대로 쓰며, 끝나도 언로드하지 않는다
-- 로드 전: 스왑 여유와 즉시 가용 메모리(모델 파일 + KV + 여유분)를 확인한다 (environment.md 4-2)
-- 로드 직후와 매 호출 전: identifier가 로드돼 있는지, 메모리 압박이 없는지 확인한다
+- 메모리 기준 (2026-11-02 변경, SWE_prj decisions.md)
+  - 로드 전: 즉시 가용(free + inactive) ≥ 필요량(모델 파일 + KV + 0.5) + 1 GiB, 압박 단계 1(정상).
+    스왑 여유 기준은 쓰지 않는다 (macOS 동적 스왑)
+  - 로드 직후와 매 호출 전: identifier가 로드돼 있고, 압박 단계가 1이며, 스왑 사용량이 로드 직전보다
+    1 GiB 넘게 늘지 않았을 것. 어긋나면 멈추고 언로드한다
+- 모델 파일 SHA-256은 로드 전 메모리 검사를 통과한 직후, 로드 전에 잰다
 - 성공·실패·중단 모두 끝나면 언로드하고, 로드 목록이 실행 전과 같은지 비교한다.
   SIGTERM·SIGHUP도 예외로 바꿔 종료 처리를 거치게 한다. 강제 종료(SIGKILL)는 --ttl이 마지막 안전장치다
 """
+import hashlib
 import json
 import re
 import shutil
@@ -22,6 +27,7 @@ from pathlib import Path
 
 GIB = 1024 ** 3
 _LMS_FALLBACK = Path.home() / ".lmstudio" / "bin" / "lms"
+LMS_MODELS = Path.home() / ".lmstudio" / "models"  # 읽기 전용 참조 (environment.md 3절)
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -99,32 +105,55 @@ def required_gib(lm_cfg: dict, guard: dict) -> float:
         + guard.get("overhead_gib", 0.5)
 
 
+def threshold_gib(lm_cfg: dict, guard: dict) -> float:
+    """로드 전 즉시 가용 메모리 기준: 필요량 + extra_margin_gib."""
+    return required_gib(lm_cfg, guard) + guard.get("extra_margin_gib", 0.0)
+
+
+def _pressure_problem(mem: dict, guard: dict) -> list[str]:
+    limit = guard.get("max_pressure_level", 1)
+    return [f"메모리 압박 단계 {mem['pressure_level']} > {limit}"] if mem["pressure_level"] > limit else []
+
+
 def problems_before_load(mem: dict, lm_cfg: dict, guard: dict) -> list[str]:
-    out = problems_while_running(mem, guard)
-    need = required_gib(lm_cfg, guard)
+    out = _pressure_problem(mem, guard)
+    need = threshold_gib(lm_cfg, guard)
     if mem["available_gib"] < need:
-        out.append(f"즉시 가용 {mem['available_gib']:.2f} GiB < 모델+KV+여유 {need:.2f} GiB")
+        out.append(f"즉시 가용 {mem['available_gib']:.2f} GiB < 필요량 {required_gib(lm_cfg, guard):.2f}"
+                   f" + {guard.get('extra_margin_gib', 0.0)} = {need:.2f} GiB")
     return out
 
 
-def problems_while_running(mem: dict, guard: dict) -> list[str]:
-    out = []
-    if mem["swap_free_gib"] < guard["min_swap_free_gib"]:
-        out.append(f"스왑 여유 {mem['swap_free_gib']:.2f} GiB < {guard['min_swap_free_gib']} GiB")
-    if mem["pressure_level"] > guard.get("max_pressure_level", 1):
-        out.append(f"메모리 압박 단계 {mem['pressure_level']} > {guard.get('max_pressure_level', 1)}")
-    return sorted(set(out))
+def problems_while_running(mem: dict, guard: dict, swap_baseline_gib: float) -> list[str]:
+    out = _pressure_problem(mem, guard)
+    grown = mem["swap_used_gib"] - swap_baseline_gib
+    if grown > guard["max_swap_increase_gib"]:
+        out.append(f"스왑 사용량이 로드 직전보다 {grown:.2f} GiB 늘었다 (> {guard['max_swap_increase_gib']})")
+    return out
 
 
-def preflight(identifier: str, guard: dict):
-    """매 호출 직전 확인: identifier가 로드돼 있고 메모리 압박이 없을 것."""
+def preflight(identifier: str, guard: dict, swap_baseline_gib: float):
+    """매 호출 직전 확인: identifier가 로드돼 있고, 압박 단계 정상, 스왑 증가가 기준 이하일 것."""
     def check() -> None:
         if identifier not in _identifiers(loaded_models()):
             raise ModelNotLoaded(f"'{identifier}'가 로드돼 있지 않다. JIT 로드를 피하려고 호출하지 않고 멈춘다")
-        problems = problems_while_running(memory_snapshot(), guard)
+        problems = problems_while_running(memory_snapshot(), guard, swap_baseline_gib)
         if problems:
             raise MemoryPressure("실행 중 메모리 압박: " + "; ".join(problems))
     return check
+
+
+def model_file_fingerprint(lm_cfg: dict) -> dict:
+    """GGUF 파일의 SHA-256과 크기 (읽기만 한다). 크기가 설정과 다르면 파일이 바뀐 것이다."""
+    path = LMS_MODELS / lm_cfg["model_file"]
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
+            h.update(chunk)
+    size = path.stat().st_size
+    if size != lm_cfg["model_file_bytes"]:
+        raise RuntimeError(f"모델 파일 크기 {size:,} B가 설정값 {lm_cfg['model_file_bytes']:,} B와 다르다")
+    return {"path": str(path), "bytes": size, "sha256": h.hexdigest(), "measured_at": _now()}
 
 
 # --------------------------------------------------------------------------- 로드·언로드
@@ -155,6 +184,7 @@ def smoke_model(lm_cfg: dict, guard: dict, on_close=None):
     session = {"started_at": _now(), "model_key": key, "identifier": ident, "loaded_by_us": False,
                "load_options": {k: lm_cfg[k] for k in ("context_length", "ttl")}, "before_loaded": before,
                "runtime": runtime_info(), "memory_before_load": memory_snapshot(), "events": []}
+    session["swap_baseline_gib"] = session["memory_before_load"]["swap_used_gib"]  # 실행 중 스왑 증가의 기준
 
     def note(msg: str) -> None:
         session["events"].append({"at": _now(), "msg": msg})
@@ -172,10 +202,16 @@ def smoke_model(lm_cfg: dict, guard: dict, on_close=None):
                                    "건드리지 않고 멈춘다")
             session.update(identifier=entry["identifier"], instance=entry)
             note(f"이미 로드된 '{entry['identifier']}'를 그대로 쓴다. 끝나도 언로드하지 않는다")
+            session["model_file"] = model_file_fingerprint(lm_cfg)
         else:
             problems = problems_before_load(session["memory_before_load"], lm_cfg, guard)
             if problems:
                 raise MemoryPressure("로드 전 메모리 기준 미달: " + "; ".join(problems))
+            note(f"로드 전 검사 통과 (가용 {session['memory_before_load']['available_gib']:.2f} GiB ≥ "
+                 f"{threshold_gib(lm_cfg, guard):.2f}, 압박 단계 {session['memory_before_load']['pressure_level']}). "
+                 "모델 파일 SHA-256 측정")
+            session["model_file"] = model_file_fingerprint(lm_cfg)
+            note(f"SHA-256 {session['model_file']['sha256']}")
             session["loaded_by_us"] = True  # load가 도중에 실패해도 finally에서 확인하고 내린다
             note(f"lms load {key} --identifier {ident} -c {lm_cfg['context_length']} --ttl {lm_cfg['ttl']}")
             session["load_output"] = lms("load", key, "--identifier", ident, "-c", str(lm_cfg["context_length"]),
@@ -186,11 +222,12 @@ def smoke_model(lm_cfg: dict, guard: dict, on_close=None):
                 raise ModelNotLoaded(f"로드 후 '{ident}'가 목록에 없다")
             session["instance"] = mine[0]
             session["memory_after_load"] = memory_snapshot()
-            problems = problems_while_running(session["memory_after_load"], guard)
+            problems = problems_while_running(session["memory_after_load"], guard, session["swap_baseline_gib"])
             if problems:
                 raise MemoryPressure("로드 직후 메모리 압박: " + "; ".join(problems))
             note(f"로드 완료. 가용 {session['memory_after_load']['available_gib']:.2f} GiB, "
-                 f"스왑 여유 {session['memory_after_load']['swap_free_gib']:.2f} GiB, "
+                 f"스왑 사용 {session['memory_after_load']['swap_used_gib']:.2f} GiB "
+                 f"(로드 직전 {session['swap_baseline_gib']:.2f}), "
                  f"압박 단계 {session['memory_after_load']['pressure_level']}")
         yield session
     except BaseException as e:
