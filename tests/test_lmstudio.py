@@ -14,7 +14,8 @@ Pages occupied by compressor:                 583302.
 """
 SWAP = "vm.swapusage: total = 3072.00M  used = 1654.12M  free = 1417.88M  (encrypted)"
 LM = {"model_key": "mistralai/mistral-7b-instruct-v0.3", "identifier": "smoke-mistral-7b-v0.3",
-      "context_length": 8192, "ttl": 900, "model_file_bytes": 4372812000, "kv_bytes_per_token": 131072}
+      "context_length": 8192, "ttl": 900, "parallel": 1, "model_file_bytes": 4372812000, "kv_bytes_per_token": 131072}
+LOAD = ("load", LM["model_key"], "--identifier", LM["identifier"], "-c", "8192", "--ttl", "900", "--parallel", "1", "-y")
 GUARD = {"overhead_gib": 0.5, "extra_margin_gib": 1.0, "max_pressure_level": 1, "max_swap_increase_gib": 1.0}
 OTHER = {"identifier": "qwen/qwen3-8b", "modelKey": "qwen/qwen3-8b", "contextLength": 8192}
 
@@ -32,9 +33,9 @@ def test_required_memory_is_file_plus_kv_plus_overhead_and_margin():
     assert round(lm.threshold_gib(LM, GUARD), 2) == 6.57
 
 
-def _mem(available=8.0, swap_used=1.0, pressure=1, swap_free=0.5):
+def _mem(available=8.0, swap_used=1.0, pressure=1, swap_free=0.5, wired=3.0):
     return {"available_gib": available, "swap_used_gib": swap_used, "swap_free_gib": swap_free,
-            "pressure_level": pressure}
+            "pressure_level": pressure, "wired_gib": wired}
 
 
 def test_memory_thresholds_before_load():
@@ -62,15 +63,22 @@ def test_model_file_fingerprint(tmp_path, monkeypatch):
 
 class FakeLMS:
     """loaded 목록을 가진 lms 대역. 호출한 명령을 기록한다."""
+    help_text = "--identifier <identifier>\n--parallel <count>  Maximum number of predictions"
+    parallel_shown = None  # None이면 요청한 값 그대로 보인다
+
     def __init__(self, loaded):
         self.loaded = list(loaded)
         self.commands = []
 
     def __call__(self, *args, timeout=600):
         self.commands.append(args)
+        if args[:2] == ("load", "--help"):
+            return self.help_text
         if args[0] == "load":
+            par = int(args[args.index("--parallel") + 1]) if "--parallel" in args else 4
             self.loaded.append({"identifier": args[args.index("--identifier") + 1], "modelKey": args[1],
-                                "contextLength": int(args[args.index("-c") + 1])})
+                                "contextLength": int(args[args.index("-c") + 1]),
+                                "parallel": self.parallel_shown or par})
         elif args[0] == "unload":
             assert "--all" not in args and "-a" not in args
             self.loaded = [m for m in self.loaded if args[1] not in m.values()]
@@ -88,7 +96,7 @@ def fake(monkeypatch):
 
         def fingerprint(cfg):
             f.commands.append(("sha256",))
-            return {"sha256": "x" * 64}
+            return {"bytes": cfg["model_file_bytes"], "sha256": "x" * 64, "sha256_measured": True}
         monkeypatch.setattr(lm, "model_file_fingerprint", fingerprint)
         return f
     return install
@@ -112,9 +120,7 @@ def test_loads_explicitly_and_unloads_only_ours_even_on_failure(fake):
             assert s["instance"]["identifier"] == "smoke-mistral-7b-v0.3"
             raise ValueError("실행 중 실패")
     assert f.commands[0] == ("sha256",)  # 메모리 검사 통과 후, 로드 전
-    assert f.commands[1] == ("load", LM["model_key"], "--identifier", LM["identifier"], "-c", "8192",
-                             "--ttl", "900", "-y")
-    assert f.commands[2] == ("unload", LM["identifier"])
+    assert f.commands[1:] == [("load", "--help"), LOAD, ("unload", LM["identifier"])]
     assert f.loaded == [OTHER] and closed[0]["restored"] and "ValueError" in closed[0]["error"]
     assert signal.getsignal(signal.SIGTERM) is not lm._raise_terminated
 
@@ -134,11 +140,12 @@ def test_pressure_right_after_load_unloads_immediately(fake, monkeypatch):
     with pytest.raises(lm.MemoryPressure, match="로드 직후"):
         with lm.smoke_model(LM, GUARD):
             pytest.fail("본문까지 가면 안 된다")
-    assert [c[0] for c in f.commands] == ["sha256", "load", "unload"] and f.loaded == []
+    assert f.commands[1:] == [("load", "--help"), LOAD, ("unload", LM["identifier"])] and f.loaded == []
 
 
 def test_same_model_loaded_by_someone_else_is_used_and_left_loaded(fake):
-    theirs = {"identifier": "mistralai/mistral-7b-instruct-v0.3", "modelKey": LM["model_key"], "contextLength": 8192}
+    theirs = {"identifier": "mistralai/mistral-7b-instruct-v0.3", "modelKey": LM["model_key"], "contextLength": 8192,
+              "parallel": 1}
     f = fake([theirs])
     with lm.smoke_model(LM, GUARD) as s:
         assert s["identifier"] == theirs["identifier"] and not s["loaded_by_us"]
@@ -146,7 +153,7 @@ def test_same_model_loaded_by_someone_else_is_used_and_left_loaded(fake):
 
 
 def test_same_model_with_other_context_length_stops(fake):
-    f = fake([{**OTHER, "identifier": "x", "modelKey": LM["model_key"], "contextLength": 4096}])
+    f = fake([{**OTHER, "identifier": "x", "modelKey": LM["model_key"], "contextLength": 4096, "parallel": 1}])
     with pytest.raises(RuntimeError, match="컨텍스트 길이"):
         with lm.smoke_model(LM, GUARD):
             pass
@@ -180,9 +187,10 @@ def test_unknown_ps_field_names_still_find_and_unload_ours(fake):
     real_call = FakeLMS.__call__
 
     def load_with_other_field(self, *args, timeout=600):
-        if args[0] == "load":  # 실제 lms ps 필드 이름이 identifier가 아닐 경우를 흉내 낸다
+        if args[0] == "load" and "--help" not in args:  # 실제 lms ps 필드 이름이 identifier가 아닐 경우를 흉내 낸다
             self.commands.append(args)
-            self.loaded.append({"instanceReference": args[args.index("--identifier") + 1], "modelKey": args[1]})
+            self.loaded.append({"instanceReference": args[args.index("--identifier") + 1], "modelKey": args[1],
+                                "parallel": 1})
             return ""
         return real_call(self, *args, timeout=timeout)
     f.__class__ = type("FakeOtherField", (FakeLMS,), {"__call__": load_with_other_field})
@@ -199,3 +207,40 @@ def test_unload_is_sent_even_if_not_found_in_list(fake, monkeypatch):
         with lm.smoke_model(LM, GUARD):
             pass
     assert ("unload", LM["identifier"]) in f2.commands
+
+
+def test_no_parallel_option_means_no_load(fake):
+    f = fake()
+    f.help_text = "--identifier <identifier>"
+    with pytest.raises(RuntimeError, match="--parallel 옵션이 없다"):
+        with lm.smoke_model(LM, GUARD):
+            pass
+    assert [c[0] for c in f.commands] == ["sha256", "load"] and f.commands[1] == ("load", "--help")
+    assert f.loaded == []
+
+
+def test_parallel_mismatch_after_load_unloads(fake):
+    f = fake()
+    f.parallel_shown = 4
+    with pytest.raises(RuntimeError, match="parallel이 4"):
+        with lm.smoke_model(LM, GUARD):
+            pass
+    assert f.commands[-1] == ("unload", LM["identifier"]) and f.loaded == []
+
+
+def test_same_model_with_other_parallel_stops(fake):
+    f = fake([{"identifier": "x", "modelKey": LM["model_key"], "contextLength": 8192, "parallel": 4}])
+    with pytest.raises(RuntimeError, match="parallel이 다르다"):
+        with lm.smoke_model(LM, GUARD):
+            pass
+    assert f.commands == []
+
+
+def test_known_sha_means_size_check_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(lm, "LMS_MODELS", tmp_path)
+    (tmp_path / "m.gguf").write_bytes(b"GGUF")
+    fp = lm.model_file_fingerprint({"model_file": "m.gguf", "model_file_bytes": 4, "model_file_sha256": "ab" * 32,
+                                    "model_file_sha256_measured_at": "t0"})
+    assert fp["sha256"] == "ab" * 32 and fp["sha256_measured"] is False and fp["sha256_measured_at"] == "t0"
+    with pytest.raises(RuntimeError, match="크기"):
+        lm.model_file_fingerprint({"model_file": "m.gguf", "model_file_bytes": 9, "model_file_sha256": "ab" * 32})

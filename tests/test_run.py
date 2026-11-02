@@ -207,3 +207,15 @@ def test_abort_after_first_call_keeps_received_response_and_marks_rerun(smoke):
     runmod._run_jobs(lambda rep: fine, "mistral-7b-local", {}, [job], infos, None)
     rec = json.loads(runmod.run_path("mistral-7b-local", "school", "unambiguous", 3).read_text())
     assert len(rec["aborted_attempts"]) == 1 and rec["aborted_attempts"][0]["error"].startswith("MemoryPressure")
+
+
+def test_aborted_attempt_links_recovered_record(smoke):
+    d = runmod.runs_dir()
+    d.mkdir(parents=True)
+    (d / "incidents.jsonl").write_text(json.dumps({"at": "T1", "model": "m", "set": "school", "input": "unambiguous",
+                                                   "rep": 3, "error": "MemoryPressure: x"}) + "\n")
+    (d / "recovered.jsonl").write_text(json.dumps({"incident_at": "T1", "set": "school", "input": "unambiguous",
+                                                   "rep": 3, "path": "incomplete/r.json", "source": "LM Studio 서버 로그"}) + "\n")
+    (a,) = runmod._aborted_attempts("school", "unambiguous", 3)
+    assert a["partial_record"] == "incomplete/r.json" and a["partial_record_source"] == "LM Studio 서버 로그"
+    assert runmod._aborted_attempts("school", "unambiguous", 2) == []

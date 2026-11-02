@@ -233,7 +233,21 @@ def _aborted_attempts(set_id: str, input_id: str, rep: int) -> list[dict]:
     if not path.exists():
         return []
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    return [r for r in rows if (r["set"], r["input"], r["rep"]) == (set_id, input_id, rep)]
+    rec_path = runs_dir() / "recovered.jsonl"  # 서버 로그에서 복원한 부분 기록 (incident 시각으로 연결)
+    recovered = {}
+    if rec_path.exists():
+        for line in rec_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                r = json.loads(line)
+                recovered[r["incident_at"]] = r
+    out = []
+    for r in rows:
+        if (r["set"], r["input"], r["rep"]) == (set_id, input_id, rep):
+            if r["at"] in recovered and "partial_record" not in r:
+                r = {**r, "partial_record": recovered[r["at"]]["path"],
+                     "partial_record_source": recovered[r["at"]]["source"]}
+            out.append(r)
+    return out
 
 
 def _print_dry_run(todo: list[tuple], manifest: dict) -> None:
@@ -271,8 +285,9 @@ def _print_lmstudio_plan(lm_cfg: dict) -> None:
     from . import lmstudio
 
     guard = experiment_config()["memory_guard"]
+    par = f" --parallel {lm_cfg['parallel']}" if "parallel" in lm_cfg else ""
     print(f"  로드 예정 (dry-run에서는 하지 않음): lms load {lm_cfg['model_key']} --identifier {lm_cfg['identifier']} "
-          f"-c {lm_cfg['context_length']} --ttl {lm_cfg['ttl']} -y")
+          f"-c {lm_cfg['context_length']} --ttl {lm_cfg['ttl']}{par} -y")
     print(f"  모델 파일: {lm_cfg['model_file']} ({lm_cfg['quantization']}, {lm_cfg['model_file_bytes']:,} B)")
     print(f"  종료 처리: lms unload {lm_cfg['identifier']} (성공·실패·중단 모두, --all 쓰지 않음)")
     before = lmstudio.loaded_models()

@@ -160,8 +160,17 @@ def preflight(identifier: str, guard: dict, swap_baseline_gib: float):
 
 
 def model_file_fingerprint(lm_cfg: dict) -> dict:
-    """GGUF 파일의 SHA-256과 크기 (읽기만 한다). 크기가 설정과 다르면 파일이 바뀐 것이다."""
+    """GGUF 파일의 SHA-256과 크기 (읽기만 한다). 크기가 설정과 다르면 파일이 바뀐 것이다.
+
+    설정에 model_file_sha256(이전 측정값)이 있으면 해시는 다시 재지 않고 크기만 확인한다.
+    """
     path = LMS_MODELS / lm_cfg["model_file"]
+    if lm_cfg.get("model_file_sha256"):
+        size = path.stat().st_size
+        if size != lm_cfg["model_file_bytes"]:
+            raise RuntimeError(f"모델 파일 크기 {size:,} B가 설정값 {lm_cfg['model_file_bytes']:,} B와 다르다")
+        return {"path": str(path), "bytes": size, "sha256": lm_cfg["model_file_sha256"], "sha256_measured": False,
+                "sha256_measured_at": lm_cfg.get("model_file_sha256_measured_at"), "size_checked_at": _now()}
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
@@ -169,7 +178,7 @@ def model_file_fingerprint(lm_cfg: dict) -> dict:
     size = path.stat().st_size
     if size != lm_cfg["model_file_bytes"]:
         raise RuntimeError(f"모델 파일 크기 {size:,} B가 설정값 {lm_cfg['model_file_bytes']:,} B와 다르다")
-    return {"path": str(path), "bytes": size, "sha256": h.hexdigest(), "measured_at": _now()}
+    return {"path": str(path), "bytes": size, "sha256": h.hexdigest(), "sha256_measured": True, "measured_at": _now()}
 
 
 # --------------------------------------------------------------------------- 로드·언로드
@@ -198,7 +207,8 @@ def smoke_model(lm_cfg: dict, guard: dict, on_close=None):
     ident, key = lm_cfg["identifier"], lm_cfg["model_key"]
     before = loaded_models()
     session = {"started_at": _now(), "model_key": key, "identifier": ident, "loaded_by_us": False,
-               "load_options": {k: lm_cfg[k] for k in ("context_length", "ttl")}, "before_loaded": before,
+               "load_options": {k: lm_cfg[k] for k in ("context_length", "ttl", "parallel") if k in lm_cfg},
+               "before_loaded": before,
                "runtime": runtime_info(), "memory_before_load": memory_snapshot(), "events": []}
     session["swap_baseline_gib"] = session["memory_before_load"]["swap_used_gib"]  # 실행 중 스왑 증가의 기준
 
@@ -216,6 +226,9 @@ def smoke_model(lm_cfg: dict, guard: dict, on_close=None):
             if _context_length(entry) != lm_cfg["context_length"]:
                 raise RuntimeError(f"같은 모델이 이미 로드돼 있으나 컨텍스트 길이가 다르다 ({_context_length(entry)}). "
                                    "건드리지 않고 멈춘다")
+            if "parallel" in lm_cfg and entry.get("parallel") != lm_cfg["parallel"]:
+                raise RuntimeError(f"같은 모델이 이미 로드돼 있으나 parallel이 다르다 ({entry.get('parallel')}). "
+                                   "건드리지 않고 멈춘다")
             session.update(identifier=entry["identifier"], instance=entry)
             note(f"이미 로드된 '{entry['identifier']}'를 그대로 쓴다. 끝나도 언로드하지 않는다")
             session["model_file"] = model_file_fingerprint(lm_cfg)
@@ -224,24 +237,34 @@ def smoke_model(lm_cfg: dict, guard: dict, on_close=None):
             if problems:
                 raise MemoryPressure("로드 전 메모리 기준 미달: " + "; ".join(problems))
             note(f"로드 전 검사 통과 (가용 {session['memory_before_load']['available_gib']:.2f} GiB ≥ "
-                 f"{threshold_gib(lm_cfg, guard):.2f}, 압박 단계 {session['memory_before_load']['pressure_level']}). "
-                 "모델 파일 SHA-256 측정")
+                 f"{threshold_gib(lm_cfg, guard):.2f}, 압박 단계 {session['memory_before_load']['pressure_level']})")
             session["model_file"] = model_file_fingerprint(lm_cfg)
-            note(f"SHA-256 {session['model_file']['sha256']}")
+            fp = session["model_file"]
+            note(f"모델 파일 {fp['bytes']:,} B, SHA-256 {fp['sha256'][:16]}… "
+                 + ("(이번에 측정)" if fp["sha256_measured"] else f"({fp.get('sha256_measured_at')} 측정값, 이번에는 크기만 확인)"))
+            args = ["load", key, "--identifier", ident, "-c", str(lm_cfg["context_length"]), "--ttl", str(lm_cfg["ttl"])]
+            if "parallel" in lm_cfg:
+                if "--parallel" not in lms("load", "--help", timeout=60):
+                    raise RuntimeError("lms load에 --parallel 옵션이 없다. 로드하지 않고 멈춘다")
+                args += ["--parallel", str(lm_cfg["parallel"])]
             session["loaded_by_us"] = True  # load가 도중에 실패해도 finally에서 확인하고 내린다
-            note(f"lms load {key} --identifier {ident} -c {lm_cfg['context_length']} --ttl {lm_cfg['ttl']}")
-            session["load_output"] = lms("load", key, "--identifier", ident, "-c", str(lm_cfg["context_length"]),
-                                         "--ttl", str(lm_cfg["ttl"]), "-y").strip()
+            note("lms " + " ".join(args))
+            session["load_output"] = lms(*args, "-y").strip()
             after_load = loaded_models()
             mine = [m for m in after_load if _present(ident, [m])]
             if not mine:
                 raise ModelNotLoaded(f"로드 후 '{ident}'가 목록에 없다")
             session["instance"] = mine[0]
+            if "parallel" in lm_cfg and mine[0].get("parallel") != lm_cfg["parallel"]:
+                raise RuntimeError(f"로드 후 parallel이 {mine[0].get('parallel')}로 보인다 (설정 {lm_cfg['parallel']})")
             session["memory_after_load"] = memory_snapshot()
             problems = problems_while_running(session["memory_after_load"], guard, session["swap_baseline_gib"])
             if problems:
                 raise MemoryPressure("로드 직후 메모리 압박: " + "; ".join(problems))
-            note(f"로드 완료. 가용 {session['memory_after_load']['available_gib']:.2f} GiB, "
+            wired = session["memory_after_load"]["wired_gib"] - session["memory_before_load"]["wired_gib"]
+            note(f"로드 완료 (parallel {mine[0].get('parallel')}). wired {session['memory_before_load']['wired_gib']:.2f} → "
+                 f"{session['memory_after_load']['wired_gib']:.2f} GiB (+{wired:.2f}), "
+                 f"가용 {session['memory_after_load']['available_gib']:.2f} GiB, "
                  f"스왑 사용 {session['memory_after_load']['swap_used_gib']:.2f} GiB "
                  f"(로드 직전 {session['swap_baseline_gib']:.2f}), "
                  f"압박 단계 {session['memory_after_load']['pressure_level']}")
