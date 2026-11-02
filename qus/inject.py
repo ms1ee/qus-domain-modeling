@@ -88,6 +88,8 @@ class Unambiguous:
 
     def __init__(self, rules: dict, set_id: str, stories: list[Story], gold_names: list[str], rng: random.Random):
         self.skip_after = {w.lower() for w in rules.get("skip_after_words", [])}
+        self.max_per_class = rules.get("max_stories_per_class")  # None이면 상한 없음
+        self.class_counts = {}  # 적용(되돌리지 않은)된 수정의 클래스별 스토리 수
         self.excluded = []
         original_vocab = vocabulary(s.text for s in stories)
         per_story = [present_classes([s.text], gold_names) for s in stories]
@@ -148,8 +150,11 @@ class Unambiguous:
             syn = syn[0].upper() + syn[1:]
         return syn
 
+    def _under_cap(self, name: str) -> bool:
+        return self.max_per_class is None or self.class_counts.get(name, 0) < self.max_per_class
+
     def edit(self, story: Story, rng: random.Random) -> Edit | None:
-        options = sorted(n for n in self.synonyms if self._noun_matches(n, story.text)[0])
+        options = sorted(n for n in self.synonyms if self._under_cap(n) and self._noun_matches(n, story.text)[0])
         if not options:
             return None
         name = rng.choice(options)
@@ -168,6 +173,10 @@ class Unambiguous:
         syn = self.synonyms[name]
         return Edit(text, {"class": name, "synonym": syn, "occurrences": len(matches),
                            "skipped_verb_uses": verb_uses, "injected_terms": [syn]})
+
+    def on_applied(self, e: Edit) -> None:
+        name = e.details["class"]
+        self.class_counts[name] = self.class_counts.get(name, 0) + 1
 
 
 # --------------------------------------------------------------------------- phrase 기반 (problem_oriented, minimal)
@@ -343,6 +352,8 @@ def inject(set_id: str, stories: list[Story], gold_names: list[str], defect_type
             entry["status"] = "applied"
             current = trial
             applied += 1
+            if hasattr(injector, "on_applied"):
+                injector.on_applied(e)
         log.append(entry)
 
     meta = {"set": set_id, "type": defect_type, "seed": seed, "rate": rate, "status": "DRAFT",
@@ -353,6 +364,8 @@ def inject(set_id: str, stories: list[Story], gold_names: list[str], defect_type
         used = {e["synonym"]: e["class"] for e in log if e["status"] == "applied"}
         meta["synonym_map"] = used  # 채점 시 동의어 → 원래 클래스로 되돌리는 데 쓴다
         meta["synonyms_chosen"] = injector.synonyms
+        meta["max_stories_per_class"] = injector.max_per_class
+        meta["class_counts"] = dict(sorted(injector.class_counts.items()))
     return current, log, meta
 
 

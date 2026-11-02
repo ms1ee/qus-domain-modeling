@@ -114,7 +114,7 @@ Claude Opus 5.5는 temperature를 받지 않고 thinking이 항상 켜져 있다
 4. 정규화만으로 같아지는 반복(`Customer`/`Customers`, 양방향 쌍)은 하나로 합치고 감점하지 않는다 (`collapsed`).
 5. 서로 다른 이름이 2·3번 매핑으로 같은 정답에 합쳐지면 1개만 TP, 나머지는 FP로 센다 (`dup`).
 6. 관계는 방향을 구분하지 않는 클래스 쌍으로 비교한다. 같은 실행의 클래스 목록 밖 끝점을 쓴 쌍은 그대로 채점하고 개수만 기록한다 (`out_of_list`).
-7. 추출에 실패한 실행도 행으로 남긴다 (`status`: `ok` / `parse_failed` / `not_called`, 점수 칸은 비움). 실패율과 절단(`finish_reason` `length`·`max_tokens`) 수는 `<scores_file>_failures.csv`에 따로 집계한다. 실패를 0점으로 볼지 뺄지는 정하지 않았다.
+7. 추출에 실패한 실행도 행으로 남긴다 (`status`: `ok` / `parse_failed` / `not_called`, 점수 칸은 비움). 실패율과 절단(`finish_reason` `length`·`max_tokens`) 수는 `<scores_file>_failures.csv`에 따로 집계한다. 요약에서는 실패 실행을 (a) 0점으로 포함한 값과 (b) 제외한 값을 나란히 보고한다 (2026-11-02 결정).
 
 ## 스모크 테스트 (개발 세트 school, 로컬 Mistral)
 
@@ -129,6 +129,8 @@ python -m qus --config smoke.yaml score          # → results/smoke_school.csv,
 ```
 
 - 결함 유형 5개: `unambiguous`, `problem_oriented`, `minimal`, `uniform`, `full_sentence`. 스토리의 20%(school 12개)를 고친다.
+  unambiguous는 클래스 하나당 최대 2개 스토리까지만 바꾼다. problem_oriented 문구는 동사구에 붙는 부사구만 쓴다.
+  규칙을 바꾸기 전의 수정본은 `archive/2026-11-02-injection-draft-v1/`에 옮겨 두었다.
   규칙과 문구는 `config/smoke_injection.yaml`에 있고 **전부 DRAFT**(팀 확인 전)다.
 - 정답 보존 검사: 원본에 나오던 정답 클래스가 수정본에도 원래 이름으로 1번 이상 남아야 한다. 깨지는 수정은 되돌리고 로그에 남긴다.
 - 로컬 모델: LM Studio의 OpenAI 호환 서버(`http://127.0.0.1:1234/v1`), Mistral-7B-Instruct-v0.3 Q4_K_M, n_ctx 8192.

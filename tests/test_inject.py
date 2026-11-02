@@ -163,3 +163,28 @@ def test_school_smoke_rules_inject_twelve_stories_per_type():
         current, log, meta = inject("school", stories, names, t, 0.2, 2026, rules)
         assert meta["n_applied"] == 12 and meta["shortfall"] == 0, t
         assert present_classes(current.values(), names) == set(names), t
+
+
+def test_unambiguous_caps_stories_per_class():
+    stories = [Story(i, f"As a customer, I want item {i}.") for i in range(1, 8)] + \
+              [Story(8, "As a clerk, I want to ship an order."), Story(9, "As a clerk, I want to pack an order.")]
+    rules = {"unambiguous": {"max_stories_per_class": 2,
+                             "synonyms": {"toy": {"customer": ["client"], "order": ["purchase"]}}}}
+    current, log, meta = inject("toy", stories, ["customer", "order"], "unambiguous", 1.0, 1, rules)
+    applied = [e["class"] for e in log if e["status"] == "applied"]
+    assert applied.count("customer") == 2 and applied.count("order") == 1  # order는 원래 이름 1번을 남긴다
+    assert meta["class_counts"] == {"customer": 2, "order": 1} and meta["max_stories_per_class"] == 2
+    assert meta["shortfall"] == 9 - 3
+
+
+def test_school_unambiguous_respects_cap_and_phrases_are_all_usable():
+    import json
+    from qus.config import BENCHMARK_DIR
+    rules = load_yaml("smoke_injection.yaml")
+    gold = json.loads((BENCHMARK_DIR / "gold" / "gold_smoke.json").read_text(encoding="utf-8"))
+    names = [c["name"] for c in gold["school"]["classes"]]
+    _, log, meta = inject("school", load_stories("school"), names, "unambiguous", 0.2, 2026, rules)
+    assert max(meta["class_counts"].values()) <= 2 and sum(meta["class_counts"].values()) == 12
+    _, _, meta = inject("school", load_stories("school"), names, "problem_oriented", 0.2, 2026, rules)
+    assert meta["excluded_rule_items"] == []
+    assert not any("which" in p["text"].split() for p in rules["problem_oriented"]["phrases"])
