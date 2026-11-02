@@ -17,7 +17,7 @@ A QUS-Grounded Study and a Knowledge Graph–Based Pipeline
 | 벤치마크 정리, gold 정정 (`prepare`) | 완료 |
 | 프롬프트, 추출, 채점 (`run`, `score`) | 완료. 실패 실행도 행으로 남기고 실패율·절단을 따로 집계 |
 | 노이즈 주입 (`inject`) | 스모크용 규칙 기반 주입기 (규칙 전부 DRAFT). 본 실험 주입기는 미정 |
-| 분석 (Δ, 노이즈 유발 오탐) | 예정 |
+| 분석 (Δ, 노이즈 유발 오탐) | 스모크(school) 요약 완료: `results/smoke_school_summary.md`. 본 실험은 예정 |
 | Phase 2 | 예정 |
 
 ## Phase 1 설계
@@ -126,6 +126,7 @@ python -m qus --config smoke.yaml inject         # → data/noisy/school/<유형
 python -m qus --config smoke.yaml run --dry-run  # 18회 (6 입력 × 3회), 호출 최대 36회
 python -m qus --config smoke.yaml run
 python -m qus --config smoke.yaml score          # → results/smoke_school.csv, smoke_school_failures.csv
+python -m qus --config smoke.yaml summarize      # → results/smoke_school_summary.md (평균 F1, Δ, SD, 실패 포함/제외)
 ```
 
 - 결함 유형 5개: `unambiguous`, `problem_oriented`, `minimal`, `uniform`, `full_sentence`. 스토리의 20%(school 12개)를 고친다.
