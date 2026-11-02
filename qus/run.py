@@ -132,26 +132,39 @@ def run(inputs: list[str] | None = None, dry_run: bool = False) -> None:
     infos = {(s, i): input_info(s, i) for _, _, s, i, _ in todo}
     for model_jobs in by_model.values():
         if model_jobs[0][1]["provider"] == "openai_compatible":
-            make_client(model_jobs[0][1])  # 생성 파라미터가 TODO(null)면 여기서 멈춘다 (네트워크 호출 없음)
+            for rep in {j[4] for j in model_jobs}:  # 생성 파라미터가 TODO(null)면 멈춘다 (네트워크 호출 없음)
+                make_client(rep_model_config(model_jobs[0][1], rep))
     if todo:
         check_manifest(write=True)
     for model_name, model_jobs in by_model.items():
         _run_model(model_name, model_jobs[0][1], model_jobs, infos)
 
 
+def rep_model_config(model_cfg: dict, rep: int) -> dict:
+    """반복별 모델 설정. seed가 목록이면 rep번째 값을 쓴다 (목록 길이는 반복 수와 같아야 한다)."""
+    seed = model_cfg.get("seed")
+    if not isinstance(seed, list):
+        return model_cfg
+    n = experiment_config()["repetitions"]
+    if len(seed) != n:
+        raise ValueError(f"seed 목록 길이 {len(seed)}가 반복 수 {n}와 다르다")
+    return {**model_cfg, "seed": seed[rep - 1]}
+
+
 def _run_model(model_name: str, model_cfg: dict, jobs: list[tuple], infos: dict) -> None:
     lm_cfg = model_cfg.get("lmstudio")
     if not lm_cfg:
-        _run_jobs(make_client(model_cfg), model_name, model_cfg, jobs, infos, None)
+        _run_jobs(lambda rep: make_client(rep_model_config(model_cfg, rep)), model_name, model_cfg, jobs, infos, None)
         return
 
     from . import lmstudio
 
     guard = experiment_config()["memory_guard"]
     with lmstudio.smoke_model(lm_cfg, guard, on_close=lambda s: _append_jsonl("sessions.jsonl", s)) as session:
-        client = make_client({**model_cfg, "model": session["identifier"]},
-                             preflight=lmstudio.preflight(session["identifier"], guard))
-        _run_jobs(client, model_name, model_cfg, jobs, infos, session)
+        check = lmstudio.preflight(session["identifier"], guard)
+        _run_jobs(lambda rep: make_client({**rep_model_config(model_cfg, rep), "model": session["identifier"]},
+                                          preflight=check),
+                  model_name, model_cfg, jobs, infos, session)
 
 
 def _session_meta(session: dict | None) -> dict | None:
@@ -164,20 +177,21 @@ def _session_meta(session: dict | None) -> dict | None:
     return meta
 
 
-def _run_jobs(client, model_name, model_cfg, jobs, infos, session) -> None:
+def _run_jobs(client_for, model_name, model_cfg, jobs, infos, session) -> None:
+    """client_for(rep): 그 반복에 쓸 클라이언트 (반복별 seed)."""
     for _, _, set_id, input_id, rep in jobs:
         path = run_path(model_name, set_id, input_id, rep)
         if path.exists():
             continue
         started = _now()
         try:
-            record = extract(client, load_input(set_id, input_id))
+            record = extract(client_for(rep), load_input(set_id, input_id))
         except BaseException as e:
             _append_jsonl("incidents.jsonl", {"at": _now(), "model": model_name, "set": set_id, "input": input_id,
                                               "rep": rep, "error": f"{type(e).__name__}: {e}"})
             print(f"  {model_name} {set_id} {input_id} rep{rep}: 중단 — {type(e).__name__}: {e}")
             raise
-        record.update(model_name=model_name, model_config=model_cfg, set=set_id, input=input_id, rep=rep,
+        record.update(model_name=model_name, model_config=rep_model_config(model_cfg, rep), set=set_id, input=input_id, rep=rep,
                       config=config_name(), input_info=infos[(set_id, input_id)], prompt_templates=prompt_hashes(),
                       session=_session_meta(session), started_at=started, finished_at=_now())
         _write_atomic(path, record)

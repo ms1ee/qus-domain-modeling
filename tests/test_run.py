@@ -106,7 +106,7 @@ def test_unexpected_error_is_logged_and_no_record_is_written(smoke):
     job = ("mistral-7b-local", {}, "school", "original", 1)
     infos = {("school", "original"): {}}
     with pytest.raises(RuntimeError):
-        runmod._run_jobs(Broken(), "mistral-7b-local", {}, [job], infos, None)
+        runmod._run_jobs(lambda rep: Broken(), "mistral-7b-local", {}, [job], infos, None)
     assert not runmod.run_path("mistral-7b-local", "school", "original", 1).exists()
     incident = json.loads((runmod.runs_dir() / "incidents.jsonl").read_text().splitlines()[0])
     assert incident["rep"] == 1 and "재시도" in incident["error"]
@@ -125,12 +125,12 @@ def test_completed_run_is_written_atomically_and_skipped_next_time(smoke):
     job = ("mistral-7b-local", {}, "school", "original", 1)
     infos = {("school", "original"): {"input_sha256": "x"}}
     fake = Fake()
-    runmod._run_jobs(fake, "mistral-7b-local", {}, [job], infos, None)
+    runmod._run_jobs(lambda rep: fake, "mistral-7b-local", {}, [job], infos, None)
     path = runmod.run_path("mistral-7b-local", "school", "original", 1)
     rec = json.loads(path.read_text())
     assert rec["classes"] == ["Student"] and rec["input_info"] == {"input_sha256": "x"} and rec["prompt_templates"]
     assert not list(path.parent.glob("*.tmp"))
-    runmod._run_jobs(fake, "mistral-7b-local", {}, [job], infos, None)
+    runmod._run_jobs(lambda rep: fake, "mistral-7b-local", {}, [job], infos, None)
     assert fake.n == 2
 
 
@@ -156,3 +156,11 @@ def test_dry_run_writes_nothing(smoke, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "18개 남음 (호출 최대 36회)" in out and "로드 전 검사 통과" in out and "TODO" in out
     assert not runmod.runs_dir().exists()
+
+
+def test_seed_list_gives_one_seed_per_repetition(smoke):
+    cfg = {"provider": "openai_compatible", "seed": [11, 12, 13]}
+    assert [runmod.rep_model_config(cfg, r)["seed"] for r in (1, 2, 3)] == [11, 12, 13]
+    assert runmod.rep_model_config({"seed": 5}, 2)["seed"] == 5
+    with pytest.raises(ValueError, match="반복 수"):
+        runmod.rep_model_config({"seed": [1, 2]}, 1)
