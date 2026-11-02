@@ -7,13 +7,12 @@
 4. 그래도 연결되지 않는 끝점이 있으면 실패한다.
 """
 import json
-import re
 
 import openpyxl
 
 from .config import BENCHMARK_DIR, experiment_config, load_yaml
 from .data import gold_path, load_stories
-from .text import normalize_term, singularize
+from .text import normalize_term, vocabulary
 
 ORIGINAL_DIR = BENCHMARK_DIR / "gold" / "original"
 
@@ -43,8 +42,7 @@ def read_gold_associations(sheet_name: str) -> list[tuple[str, str]]:
 
 def _story_vocabulary(set_id: str) -> str:
     """스토리 전체를 정규화한 텍스트. 단어 경계 매칭을 위해 양끝에 공백을 둔다."""
-    words = re.findall(r"[a-z]+", " ".join(s.text for s in load_stories(set_id)).lower())
-    return " " + " ".join(singularize(w) for w in words) + " "
+    return vocabulary(s.text for s in load_stories(set_id))
 
 
 def build_set(set_id: str, sheet_name: str, fixes: dict) -> tuple[dict, list[str]]:

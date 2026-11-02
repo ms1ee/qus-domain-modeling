@@ -37,3 +37,13 @@ def normalize_term(term: str) -> str:
     words = re.sub(r"[\s_]+", " ", term.lower()).split(" ")
     words[-1] = singularize(words[-1])
     return " ".join(words)
+
+
+def vocab_key(text: str) -> str:
+    """단어 단위 비교용 키: 알파벳 단어만 소문자로, 각 단어를 단수화 ("E-learning Units" -> "e learning unit")."""
+    return " ".join(singularize(w) for w in re.findall(r"[a-z]+", text.lower()))
+
+
+def vocabulary(texts) -> str:
+    """여러 스토리를 vocab_key로 이은 텍스트. 단어 경계 매칭을 위해 양끝에 공백을 둔다."""
+    return " " + vocab_key(" ".join(texts)) + " "
