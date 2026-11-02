@@ -73,7 +73,7 @@ class FakeLMS:
                                 "contextLength": int(args[args.index("-c") + 1])})
         elif args[0] == "unload":
             assert "--all" not in args and "-a" not in args
-            self.loaded = [m for m in self.loaded if m["identifier"] != args[1]]
+            self.loaded = [m for m in self.loaded if args[1] not in m.values()]
         return ""
 
 
@@ -173,3 +173,29 @@ def test_preflight(fake, monkeypatch):
         lm.preflight(LM["identifier"], GUARD, 1.0)()
     fake([{"identifier": LM["identifier"]}])
     lm.preflight(LM["identifier"], GUARD, 1.0)()
+
+
+def test_unknown_ps_field_names_still_find_and_unload_ours(fake):
+    f = fake([OTHER])
+    real_call = FakeLMS.__call__
+
+    def load_with_other_field(self, *args, timeout=600):
+        if args[0] == "load":  # 실제 lms ps 필드 이름이 identifier가 아닐 경우를 흉내 낸다
+            self.commands.append(args)
+            self.loaded.append({"instanceReference": args[args.index("--identifier") + 1], "modelKey": args[1]})
+            return ""
+        return real_call(self, *args, timeout=timeout)
+    f.__class__ = type("FakeOtherField", (FakeLMS,), {"__call__": load_with_other_field})
+    closed = []
+    with lm.smoke_model(LM, GUARD, on_close=closed.append) as s:
+        assert s["instance"]["instanceReference"] == LM["identifier"]
+    assert ("unload", LM["identifier"]) in f.commands and f.loaded == [OTHER] and closed[0]["restored"]
+
+
+def test_unload_is_sent_even_if_not_found_in_list(fake, monkeypatch):
+    f2 = fake()
+    monkeypatch.setattr(lm, "loaded_models", lambda: [])  # 로드 뒤에도 목록에서 못 찾는 경우
+    with pytest.raises(lm.ModelNotLoaded, match="로드 후"):
+        with lm.smoke_model(LM, GUARD):
+            pass
+    assert ("unload", LM["identifier"]) in f2.commands

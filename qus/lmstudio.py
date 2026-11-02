@@ -62,8 +62,21 @@ def loaded_models() -> list[dict]:
     return json.loads(lms("ps", "--json", timeout=60) or "[]")
 
 
+def _entry_id(m: dict) -> str:
+    """로드 목록 항목의 이름. `lms ps --json` 필드 이름이 달라도 비교가 되게 몇 가지를 차례로 본다."""
+    for key in ("identifier", "id", "modelKey", "path"):
+        if m.get(key):
+            return str(m[key])
+    return json.dumps(m, sort_keys=True)
+
+
 def _identifiers(models: list[dict]) -> list[str]:
-    return sorted(str(m.get("identifier")) for m in models)
+    return sorted(_entry_id(m) for m in models)
+
+
+def _present(ident: str, models: list[dict]) -> bool:
+    """ident가 로드 목록에 있는지. 필드 이름에 기대지 않도록 항목 JSON 안의 정확한 문자열 값도 본다."""
+    return any(_entry_id(m) == ident or f'"{ident}"' in json.dumps(m) for m in models)
 
 
 def runtime_info() -> dict:
@@ -135,7 +148,7 @@ def problems_while_running(mem: dict, guard: dict, swap_baseline_gib: float) -> 
 def preflight(identifier: str, guard: dict, swap_baseline_gib: float):
     """매 호출 직전 확인: identifier가 로드돼 있고, 압박 단계 정상, 스왑 증가가 기준 이하일 것."""
     def check() -> None:
-        if identifier not in _identifiers(loaded_models()):
+        if not _present(identifier, loaded_models()):
             raise ModelNotLoaded(f"'{identifier}'가 로드돼 있지 않다. JIT 로드를 피하려고 호출하지 않고 멈춘다")
         problems = problems_while_running(memory_snapshot(), guard, swap_baseline_gib)
         if problems:
@@ -190,7 +203,7 @@ def smoke_model(lm_cfg: dict, guard: dict, on_close=None):
         session["events"].append({"at": _now(), "msg": msg})
         print(f"  [lmstudio] {msg}")
 
-    if ident in _identifiers(before):
+    if _present(ident, before):
         raise RuntimeError(f"'{ident}'가 이미 로드돼 있다 (이전 세션의 잔여일 수 있음). 건드리지 않고 멈춘다")
     same_key = [m for m in before if m.get("modelKey") == key]
     old_handlers = {s: signal.signal(s, _raise_terminated) for s in (signal.SIGTERM, signal.SIGHUP)}
@@ -217,7 +230,7 @@ def smoke_model(lm_cfg: dict, guard: dict, on_close=None):
             session["load_output"] = lms("load", key, "--identifier", ident, "-c", str(lm_cfg["context_length"]),
                                          "--ttl", str(lm_cfg["ttl"]), "-y").strip()
             after_load = loaded_models()
-            mine = [m for m in after_load if m.get("identifier") == ident]
+            mine = [m for m in after_load if _present(ident, [m])]
             if not mine:
                 raise ModelNotLoaded(f"로드 후 '{ident}'가 목록에 없다")
             session["instance"] = mine[0]
@@ -236,14 +249,16 @@ def smoke_model(lm_cfg: dict, guard: dict, on_close=None):
     finally:
         try:
             if session["loaded_by_us"]:
-                if ident in _identifiers(loaded_models()):
-                    note(f"lms unload {ident}")
+                # 목록 검색 결과와 상관없이 우리 identifier에는 항상 언로드를 보낸다 (필드 이름 차이로 놓치지 않게)
+                was_present = _present(ident, loaded_models())
+                note(f"lms unload {ident}" + ("" if was_present else " (목록에서 못 찾았지만 보낸다)"))
+                try:
                     lms("unload", ident, timeout=300)
-                else:
-                    note(f"'{ident}'가 이미 내려가 있다 (TTL 또는 외부 언로드)")
+                except RuntimeError as e:
+                    note(f"언로드 명령 결과: {e}")
             after = loaded_models()
             session.update(after_loaded=after, finished_at=_now(), memory_after_unload=memory_snapshot(),
-                           restored=_identifiers(after) == _identifiers(before))
+                           restored=_identifiers(after) == _identifiers(before) and not _present(ident, after))
             note(f"실행 전 로드 목록 {_identifiers(before)} / 지금 {_identifiers(after)} → "
                  + ("원래 상태와 같다" if session["restored"] else "원래 상태와 다르다 — 확인 필요"))
         finally:
