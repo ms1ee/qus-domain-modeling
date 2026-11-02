@@ -1,4 +1,5 @@
 """벤치마크 단일 프롬프트로 클래스 → 관계를 차례로 추출한다 (호출 2회)."""
+import hashlib
 import json
 from dataclasses import asdict
 
@@ -40,13 +41,23 @@ def parse_final_json(text: str, key: str):
     return None
 
 
+def sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _call_record(prompt: str, resp) -> dict:
+    """호출 1회 기록. truncated: 출력이 max_tokens에서 잘림 (finish_reason == "length" 등)."""
+    return {"prompt": prompt, "prompt_sha256": sha256(prompt), "response": asdict(resp),
+            "truncated": resp.truncated}
+
+
 def extract(client, stories: list[Story]) -> dict:
     """실행 기록 1건. 클래스 파싱에 실패하면 관계 호출은 하지 않는다."""
     record = {"classes": None, "associations": None, "error": None, "calls": {}}
 
     prompt = build_class_prompt(stories)
     resp = client.complete(prompt)
-    record["calls"]["classes"] = {"prompt": prompt, "response": asdict(resp)}
+    record["calls"]["classes"] = _call_record(prompt, resp)
     classes = parse_final_json(resp.text, "classes")
     if classes is None or not all(isinstance(c, str) for c in classes):
         record["error"] = f"classes: 최종 JSON을 찾지 못함 (stop_reason={resp.stop_reason})"
@@ -55,7 +66,7 @@ def extract(client, stories: list[Story]) -> dict:
 
     prompt = build_relationship_prompt(stories, classes)
     resp = client.complete(prompt)
-    record["calls"]["associations"] = {"prompt": prompt, "response": asdict(resp)}
+    record["calls"]["associations"] = _call_record(prompt, resp)
     pairs = parse_final_json(resp.text, "associations")
     if pairs is None:
         record["error"] = f"associations: 최종 JSON을 찾지 못함 (stop_reason={resp.stop_reason})"

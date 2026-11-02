@@ -1,5 +1,5 @@
 from qus.data import Story
-from qus.extract import build_relationship_prompt, extract, parse_final_json
+from qus.extract import build_relationship_prompt, extract, parse_final_json, sha256
 from qus.llm import LLMResponse
 
 STORIES = [Story(1, "As a customer, I want to place an order, so that I get products.")]
@@ -41,3 +41,15 @@ def test_extract_stops_when_classes_unparsable():
     record = extract(client, STORIES)
     assert record["classes"] is None and "associations" not in record["calls"]
     assert record["error"].startswith("classes:")
+
+
+def test_calls_record_prompt_hash_and_truncation():
+    class CutClient(FakeClient):
+        def complete(self, prompt):
+            self.prompts.append(prompt)
+            return LLMResponse(self.texts.pop(0), "fake", "length", 1, 1, {})
+
+    record = extract(CutClient('{"classes": ["Cust'), STORIES)
+    call = record["calls"]["classes"]
+    assert call["truncated"] is True and call["prompt_sha256"] == sha256(call["prompt"])
+    assert record["classes"] is None and "stop_reason=length" in record["error"]

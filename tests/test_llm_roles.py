@@ -29,3 +29,15 @@ def test_one_model_cannot_serve_two_roles():
 def test_unknown_model_name():
     with pytest.raises(ValueError, match="없는 모델"):
         validate_roles({"models": MODELS, "roles": {"injector": "llama"}})
+
+
+def test_rule_based_injector_needs_no_model():
+    validate_roles({"models": MODELS, "roles": {"extractors": ["claude"], "injector": "rule_based"}})
+    with pytest.raises(ValueError, match="rule_based"):
+        validate_roles({"models": MODELS, "roles": {"extractors": ["claude"], "injector": ["rule_based", "gpt"]}})
+
+
+def test_smoke_config_is_valid():
+    from qus.config import load_yaml
+
+    validate_roles(load_yaml("smoke.yaml"))
