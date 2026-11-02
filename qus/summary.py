@@ -195,7 +195,7 @@ def _pair(a, b, signed=False):
     return f(a) if a == b or (a is not None and b is not None and abs(a - b) < 5e-4) else f"{f(a)} (b {f(b)})"
 
 
-def _md_prf(tables: dict, inputs: list[str]) -> list[str]:
+def _md_prf(tables: dict, inputs: list[str], labels: dict | None = None) -> list[str]:
     """클래스 F1·정밀도·재현율 (전체 반복). tables[metric] = metric_table 결과."""
     lines = ["| 입력 | n | F1 평균 | Δ | Δ/SD | 정밀도 평균 | Δ | Δ/SD | 재현율 평균 | Δ | Δ/SD |",
              "|---|---|---|---|---|---|---|---|---|---|---|"]
@@ -206,7 +206,7 @@ def _md_prf(tables: dict, inputs: list[str]) -> list[str]:
             cells += [_pair(r["mean_incl0"], r["mean_excl"]), _pair(r["delta_incl0"], r["delta_excl"], True),
                       _pair(r["delta_over_sd_incl0"], r["delta_over_sd_excl"], True)]
         r = tables["f1"][i]
-        label = input_id
+        label = (labels or {}).get(input_id, input_id)
         if input_id == "original":
             label += " (SD " + " / ".join(_fmt(tables[m][i]["sd_incl0"]) for m in ("f1", "precision", "recall")) + ")"
         lines.append(f"| {label} | {r['runs']}" + (f", 실패 {r['failed']}" if r["failed"] else "") + " | "
@@ -214,17 +214,17 @@ def _md_prf(tables: dict, inputs: list[str]) -> list[str]:
     return lines
 
 
-def _md_prf_single(table: list[dict]) -> list[str]:
+def _md_prf_single(table: list[dict], labels: dict | None = None) -> list[str]:
     lines = ["| 입력 | n | 평균 | Δ | Δ/SD | 절단 |", "|---|---|---|---|---|---|"]
     for r in table:
-        label = r["input"] + (f" (SD {_fmt(r['sd_incl0'])})" if r["input"] == "original" else "")
+        label = (labels or {}).get(r["input"], r["input"]) + (f" (SD {_fmt(r['sd_incl0'])})" if r["input"] == "original" else "")
         lines.append(f"| {label} | {r['runs']}" + (f", 실패 {r['failed']}" if r["failed"] else "") + " | "
                      f"{_pair(r['mean_incl0'], r['mean_excl'])} | {_pair(r['delta_incl0'], r['delta_excl'], True)} | "
                      f"{_pair(r['delta_over_sd_incl0'], r['delta_over_sd_excl'], True)} | {r['truncated']} |")
     return lines
 
 
-def _md_cache(cache: dict, inputs: list[str]) -> list[str]:
+def _md_cache(cache: dict, inputs: list[str], labels: dict | None = None) -> list[str]:
     lines = []
     for input_id in inputs:
         cells, reused, total = [], 0, 0
@@ -233,7 +233,7 @@ def _md_cache(cache: dict, inputs: list[str]) -> list[str]:
             cells.append(" / ".join(str(c.get(k, 0)) for k in CACHE_KINDS))
             reused += c.get("전체 재사용", 0) + c.get("부분 재사용", 0)
             total += sum(c.values())
-        lines.append(f"| {input_id} | {cells[0]} | {cells[1]} | {reused}/{total}"
+        lines.append(f"| {(labels or {}).get(input_id, input_id)} | {cells[0]} | {cells[1]} | {reused}/{total}"
                      + (f" ({reused / total:.0%})" if total else "") + " |")
     return lines
 
@@ -261,16 +261,16 @@ def dose_table(tall: dict, contamination: list[dict], inputs: list[str], set_id:
             row["contamination"] = c["mean_exact"] if c and base in CONTAMINATION_TYPES else None
             row["share_with_any"] = c["share_runs_with_any"] if c and base in CONTAMINATION_TYPES else None
             out.append(row)
-    return sorted(out, key=lambda r: (bases.index(r["type"]), r["target_rate"]))
+    return sorted(out, key=lambda r: (bases.index(r["type"]), r["actual_rate"], r["target_rate"]))
 
 
 def _md_dose(rows: list[dict]) -> list[str]:
-    lines = ["| 유형 | 목표 비율 | 실제 비율 | n | 클래스 F1 | 정밀도 | 재현율 | 오염 (실행당 완전 일치) | 오염 ≥1 실행 비율 |",
-             "|---|---|---|---|---|---|---|---|---|"]
+    lines = ["| 유형 | 주입 비율: 실제 (목표) | n | 클래스 F1 | 정밀도 | 재현율 | 오염 (실행당 완전 일치) | 오염 ≥1 실행 비율 |",
+             "|---|---|---|---|---|---|---|---|"]
     for r in rows:
         cont = "–" if r["contamination"] is None else f"{r['contamination']:.2f}"
         share = "–" if r["share_with_any"] is None else f"{r['share_with_any']:.0%}"
-        lines.append(f"| {r['type']} | {r['target_rate']:.0%} | {r['actual_rate']:.1%} | {r['runs']} | "
+        lines.append(f"| {r['type']} | {r['actual_rate']:.1%} (목표 {r['target_rate']:.0%}) | {r['runs']} | "
                      f"{_pair(r['f1_incl0'], r['f1_excl'])} | {_pair(r['precision_incl0'], r['precision_excl'])} | "
                      f"{_pair(r['recall_incl0'], r['recall_excl'])} | {cont} | {share} |")
     return lines
@@ -286,14 +286,27 @@ def _md_contamination(rows: list[dict]) -> list[str]:
     return lines
 
 
-def _md_by_rep(table: list[dict]) -> list[str]:
+def rate_labels(inputs: list[str], set_id: str, seed: int) -> dict[str, str]:
+    """표에 쓸 입력 이름: 실제 주입 비율을 앞세우고 목표 비율은 괄호로 (예: 'minimal@50 [50.8% (목표 50%)]')."""
+    out = {}
+    for i in inputs:
+        if i == "original":
+            out[i] = "original [0%]"
+            continue
+        meta = load_meta(set_id, "unambiguous" if i == UNMAPPED else i, seed)
+        out[i] = f"{i} [{meta['n_applied'] / meta['n_stories']:.1%} (목표 {meta['rate']:.0%})]"
+    return out
+
+
+def _md_by_rep(table: list[dict], labels: dict | None = None) -> list[str]:
+    labels = labels or {}
     lines = ["| 입력 | 반복별 값 (rep1부터) |", "|---|---|"]
     for r in table:
-        lines.append(f"| {r['input']} | {', '.join(str(v) for v in r['by_rep'])} |")
+        lines.append(f"| {labels.get(r['input'], r['input'])} | {', '.join(str(v) for v in r['by_rep'])} |")
     return lines
 
 
-def _md_ratio_by_scope(t3: dict, tall: dict, inputs: list[str]) -> list[str]:
+def _md_ratio_by_scope(t3: dict, tall: dict, inputs: list[str], labels: dict | None = None) -> list[str]:
     """Δ/SD를 반복 3회 시점(rep1–3)과 전체 반복 시점으로 나란히."""
     keys = [("classes", "f1"), ("classes", "precision"), ("classes", "recall"), ("associations", "f1")]
     head = " | ".join(f"{'클래스' if t == 'classes' else '관계'} {m} 3회 | 전체" for t, m in keys)
@@ -304,7 +317,8 @@ def _md_ratio_by_scope(t3: dict, tall: dict, inputs: list[str]) -> list[str]:
             a, b = t3[k][i], tall[k][i]
             cells += [_pair(a["delta_over_sd_incl0"], a["delta_over_sd_excl"], True),
                       _pair(b["delta_over_sd_incl0"], b["delta_over_sd_excl"], True)]
-        lines.append(f"| {input_id} | {tall[('classes', 'f1')][i]['runs']} | " + " | ".join(cells) + " |")
+        lines.append(f"| {(labels or {}).get(input_id, input_id)} | {tall[('classes', 'f1')][i]['runs']} | "
+                     + " | ".join(cells) + " |")
     return lines
 
 
@@ -347,23 +361,25 @@ def summarize() -> None:
     paper = (cfg.get("paper_reference") or {}).get(set_id)
     orig = next(r for r in tall[("classes", "f1")] if r["input"] == "original")
     n_rep = {i: tall[("classes", "f1")][k]["runs"] for k, i in enumerate(inputs)}
+    labels = rate_labels(inputs, set_id, cfg["seed"])
     md = [f"# 스모크 결과 요약 — {set_id} (숫자만, 판단 없음)", "",
           f"실행 기록 {len(records)}건 (입력별 반복 수: " + ", ".join(f"{i} {n}" for i, n in n_rep.items() if i != UNMAPPED)
           + "). Δ = 유형 평균 − 원본 평균 (음수면 하락). SD = 원본 반복의 표본표준편차(n−1). "
-          "값은 (a) 실패 실행을 0점으로 포함한 것이고, (b) 실패 실행을 뺀 값이 다르면 괄호로 적었다.", "",
+          "값은 (a) 실패 실행을 0점으로 포함한 것이고, (b) 실패 실행을 뺀 값이 다르면 괄호로 적었다. "
+          "입력 이름 뒤 [ ]는 실제 주입 비율(고친 스토리 / 61)이고 괄호 안이 목표 비율이다.", "",
           "`unambiguous` 행이 기본 채점이다 (주입 로그의 원래 용어 → 동의어 대응으로 동의어를 원래 정답 클래스로 되돌림,"
           f" README 채점 규칙 2, 2026-11-02 확정). `{UNMAPPED}` 행은 같은 실행을 되돌림 없이 채점한 보조 지표다.", "",
-          "## 클래스: F1·정밀도·재현율 (전체 반복)", "", *_md_prf({m: tall[("classes", m)] for m in ("f1", "precision", "recall")}, inputs), "",
+          "## 클래스: F1·정밀도·재현율 (전체 반복)", "", *_md_prf({m: tall[("classes", m)] for m in ("f1", "precision", "recall")}, inputs, labels), "",
           "## Δ/SD: 반복 3회 시점(rep1–3)과 전체 반복", "",
           "3회 열은 rep1–3만으로, 전체 열은 모든 반복으로 원본 평균·SD와 유형 평균을 다시 계산한 값이다.", "",
-          *_md_ratio_by_scope(t3, tall, inputs), "",
-          "## 관계 F1 (전체 반복)", "", *_md_prf_single(tall[("associations", "f1")]), "",
-          "## 반복별 값", "", "### 클래스 F1", "", *_md_by_rep(tall[("classes", "f1")]), "",
-          "### 관계 F1", "", *_md_by_rep(tall[("associations", "f1")]), "",
+          *_md_ratio_by_scope(t3, tall, inputs, labels), "",
+          "## 관계 F1 (전체 반복)", "", *_md_prf_single(tall[("associations", "f1")], labels), "",
+          "## 반복별 값", "", "### 클래스 F1", "", *_md_by_rep(tall[("classes", "f1")], labels), "",
+          "### 관계 F1", "", *_md_by_rep(tall[("associations", "f1")], labels), "",
           "## 프롬프트 캐시 재사용 (LM Studio 서버 로그 기준)", "",
           "전체 재사용 = 1토큰 이하만 새로 계산, 부분 재사용 = 100토큰 넘게 재사용(DRAFT 기준), 새로 계산 = 그 밖.", "",
           "| 입력 | 클래스 호출 (전체 / 부분 / 새로 / 미확인) | 관계 호출 (전체 / 부분 / 새로 / 미확인) | 재사용 비율 (전체+부분) |",
-          "|---|---|---|---|", *_md_cache(cache, cfg["inputs"]), "",
+          "|---|---|---|---|", *_md_cache(cache, cfg["inputs"], labels), "",
           "## 실패·절단 (대상별)", "", "| 입력 | 대상 | 실행 | 성공 | 파싱 실패 | 호출 안 함 | 실패율 | 절단 |",
           "|---|---|---|---|---|---|---|---|"]
     for f_ in failures:

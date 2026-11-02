@@ -124,3 +124,12 @@ def test_dose_table_uses_actual_rates_and_baseline(smoke):
     top = dose[-1]
     assert round(top["actual_rate"], 3) == round(44 / 61, 3) and top["f1_excl"] == 0.3 and top["contamination"] == 3.0
     assert dose[1]["contamination"] is None  # 기본 20%의 오염 행이 없으면 비워 둔다
+
+
+def test_rate_labels_show_actual_then_target(smoke):
+    labels = summary.rate_labels(["original", "problem_oriented", "problem_oriented@100", summary.UNMAPPED],
+                                 "school", 2026)
+    assert labels["original"] == "original [0%]"
+    assert labels["problem_oriented"] == "problem_oriented [19.7% (목표 20%)]"
+    assert labels["problem_oriented@100"] == "problem_oriented@100 [72.1% (목표 100%)]"
+    assert labels[summary.UNMAPPED].endswith("[19.7% (목표 20%)]")

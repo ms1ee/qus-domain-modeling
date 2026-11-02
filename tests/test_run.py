@@ -78,8 +78,8 @@ def smoke(tmp_path, monkeypatch):
 
 def test_smoke_plan_counts(smoke):
     jobs = runmod.plan()
-    dose = {f"{t}@{p}" for t in ("problem_oriented", "minimal", "unambiguous") for p in (50, 100)}
-    assert len(jobs) == 5 * 10 + 3 + 6 * 10
+    dose = {f"{t}@{p}" for t in ("problem_oriented", "minimal", "unambiguous") for p in (50, 100)} - {"unambiguous@100"}
+    assert len(jobs) == 5 * 10 + 3 + 5 * 10
     assert {j[3] for j in jobs} == {"original", "unambiguous", "problem_oriented", "minimal", "uniform",
                                     "full_sentence"} | dose
     assert runmod.input_path("school", "minimal@50").as_posix().endswith("data/noisy/school/minimal@50/seed2026.txt")
@@ -162,7 +162,7 @@ def test_dry_run_writes_nothing(smoke, monkeypatch, capsys):
                         lambda: {"available_gib": 7.0, "swap_used_gib": 1.0, "pressure_level": 1})
     runmod.run(dry_run=True)
     out = capsys.readouterr().out
-    assert "113개 남음 (호출 최대 226회)" in out and "목표 100% (61/61) → 실제 72.1% (44)" in out and "로드 전 검사 통과" in out and "TODO" not in out
+    assert "103개 남음 (호출 최대 206회)" in out and "목표 100% (61/61) → 실제 72.1% (44)" in out and "로드 전 검사 통과" in out and "TODO" not in out
     assert "'temperature': 0.7" in out and "'seed': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]" in out and "top_k" in out
     assert not runmod.runs_dir().exists()
 
