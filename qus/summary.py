@@ -295,7 +295,7 @@ def summarize() -> None:
     if paper:
         md += ["", "## 원 논문과 나란히", "",
                "| | 클래스 F1 |", "|---|---|",
-               f"| 우리 원본 입력, 3회 평균 (a) / (b) | {_fmt(orig['mean_incl0'])} / {_fmt(orig['mean_excl'])} |",
+               f"| 우리 원본 입력, {orig['runs']}회 평균 (a) / (b) | {_fmt(orig['mean_incl0'])} / {_fmt(orig['mean_excl'])} |",
                f"| {paper['source']} | {paper['classes_f1']} |", "",
                f"채점 방식이 다르다: {paper['note']}"]
     text = "\n".join(md) + "\n"
