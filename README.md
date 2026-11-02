@@ -129,8 +129,9 @@ python -m qus --config smoke.yaml score          # → results/smoke_school.csv,
 ```
 
 - 결함 유형 5개: `unambiguous`, `problem_oriented`, `minimal`, `uniform`, `full_sentence`. 스토리의 20%(school 12개)를 고친다.
-  unambiguous는 클래스 하나당 최대 2개 스토리까지만 바꾼다. problem_oriented 문구는 동사구에 붙는 부사구만 쓴다.
-  규칙을 바꾸기 전의 수정본은 `archive/2026-11-02-injection-draft-v1/`에 옮겨 두었다.
+  unambiguous는 means·ends에서만 바꾸고(role 자리 제외) 클래스 하나당 최대 2개 스토리까지만 바꾼다.
+  problem_oriented 문구는 동사구에 붙는 부사구만 쓰고, means가 종속절(when, starting, if …)로 끝나는 스토리는 뺀다.
+  규칙을 바꾸기 전의 수정본은 `archive/2026-11-02-injection-draft-v1/`, `-v2/`에 옮겨 두었다.
   규칙과 문구는 `config/smoke_injection.yaml`에 있고 **전부 DRAFT**(팀 확인 전)다.
 - 정답 보존 검사: 원본에 나오던 정답 클래스가 수정본에도 원래 이름으로 1번 이상 남아야 한다. 깨지는 수정은 되돌리고 로그에 남긴다.
 - 로컬 모델: LM Studio의 OpenAI 호환 서버(`http://127.0.0.1:1234/v1`), Mistral-7B-Instruct-v0.3 Q4_K_M, n_ctx 8192.

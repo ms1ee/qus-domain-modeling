@@ -188,3 +188,52 @@ def test_school_unambiguous_respects_cap_and_phrases_are_all_usable():
     _, _, meta = inject("school", load_stories("school"), names, "problem_oriented", 0.2, 2026, rules)
     assert meta["excluded_rule_items"] == []
     assert not any("which" in p["text"].split() for p in rules["problem_oriented"]["phrases"])
+
+
+@pytest.mark.parametrize("text,role", [
+    ("As a teacher I want to grade work.", "teacher"),
+    ("As a student, once I am 18 years old I want to change my preferences.", "student"),
+    ("As an administrator, I want to upload schedules.", "administrator"),
+])
+def test_role_end(text, role):
+    assert text[:inj.role_end(text)].endswith(role)
+
+
+def test_unambiguous_can_skip_role_position():
+    stories = [Story(1, "As a customer, I want to help a customer, so that the customer is happy."),
+               Story(2, "As a customer, I want to pay."), Story(3, "As a clerk, I want a customer.")]
+    rules = {"unambiguous": {"skip_role_position": True, "synonyms": {"toy": {"customer": ["client"]}}}}
+    current, log, meta = inject("toy", stories, ["customer"], "unambiguous", 1.0, 1, rules)
+    applied = {e["story"]: e for e in log if e["status"] == "applied"}
+    assert 2 not in applied and all(current[i].startswith(stories[i - 1].text[:13]) for i in (1, 2))
+    if 1 in applied:
+        assert current[1] == "As a customer, I want to help a client, so that the client is happy."
+        assert applied[1]["skipped_role_uses"] == 1
+
+
+def test_problem_oriented_skips_means_ending_in_subordinate_clause():
+    rules = {"problem_oriented": {**RULES["problem_oriented"],
+                                  "exclude_if_means_ends_with_clause": ["when", "starting", "as soon as"]}}
+    po = inj.ProblemOriented(rules["problem_oriented"], "toy", STORIES, GOLD, inj.random.Random(0))
+    assert po.why_not(Story(1, "As a user, I want a ping when I log in, so that I know.")).startswith("means 끝이 종속절")
+    assert po.why_not(Story(2, "As a user, I want to see data, starting when I join.")).startswith("means 끝이 종속절")
+    assert po.why_not(Story(3, "As a user, I want an alert as soon as it ships.")).startswith("means 끝이 종속절")
+    assert po.why_not(Story(4, "As a user, I want to see data when possible, in a table, so that I know.")) is None
+    assert po.why_not(Story(5, "As a user, once I log in I want data.")) == "템플릿대로 읽히지 않음"
+
+
+def test_school_v3_rules():
+    """problem_oriented: 종속절로 끝나는 means 제외, 12개 유지 / unambiguous: role 자리 그대로, 클래스당 2개 이하."""
+    import json
+    from qus.config import BENCHMARK_DIR
+    rules = load_yaml("smoke_injection.yaml")
+    gold = json.loads((BENCHMARK_DIR / "gold" / "gold_smoke.json").read_text(encoding="utf-8"))
+    names = [c["name"] for c in gold["school"]["classes"]]
+    stories = load_stories("school")
+    _, log, meta = inject("school", stories, names, "problem_oriented", 0.2, 2026, rules)
+    assert meta["n_applied"] == 12 and meta["team_review"] == ["팀 검토: 문구와 기능의 의미 일치"]
+    assert {x["story"] for x in meta["ineligible_stories"]} >= {40, 53}
+    _, log, meta = inject("school", stories, names, "unambiguous", 0.2, 2026, rules)
+    assert meta["n_applied"] == 12 and max(meta["class_counts"].values()) <= 2
+    for e in log:
+        assert e["after"][:inj.role_end(e["after"])] == e["before"][:inj.role_end(e["before"])]

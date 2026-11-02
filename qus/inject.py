@@ -32,6 +32,16 @@ STORY_RE = re.compile(
 )
 
 
+# role 자리 ("As a ___"). 템플릿대로 읽히지 않는 스토리(예: "As a student, once I am 18 ...")에도 쓴다
+ROLE_RE = re.compile(r"^As\s+(?:an?|the)\s+(?P<role>.+?)(?=,|\s+I\s)", re.IGNORECASE)
+
+
+def role_end(text: str) -> int:
+    """role 자리가 끝나는 위치. role 자리를 못 찾으면 0."""
+    m = ROLE_RE.match(text)
+    return m.end("role") if m else 0
+
+
 def noisy_path(set_id: str, defect_type: str, seed: int) -> Path:
     return NOISY_DIR / set_id / defect_type / f"seed{seed}.txt"
 
@@ -89,6 +99,7 @@ class Unambiguous:
     def __init__(self, rules: dict, set_id: str, stories: list[Story], gold_names: list[str], rng: random.Random):
         self.skip_after = {w.lower() for w in rules.get("skip_after_words", [])}
         self.max_per_class = rules.get("max_stories_per_class")  # None이면 상한 없음
+        self.skip_role = bool(rules.get("skip_role_position"))  # True면 "As a ___" 자리는 바꾸지 않는다
         self.class_counts = {}  # 적용(되돌리지 않은)된 수정의 클래스별 스토리 수
         self.excluded = []
         original_vocab = vocabulary(s.text for s in stories)
@@ -128,15 +139,19 @@ class Unambiguous:
             used.add(vocab_key(self.synonyms[name]))
         self.patterns = {n: _class_pattern(n) for n in self.synonyms}
 
-    def _noun_matches(self, name: str, text: str) -> tuple[list[re.Match], int]:
-        noun, verb = [], 0
+    def _noun_matches(self, name: str, text: str) -> tuple[list[re.Match], int, int]:
+        """(바꿀 출현, 동사 용법으로 건너뛴 수, role 자리라서 건너뛴 수)."""
+        noun, verb, role = [], 0, 0
+        start = role_end(text) if self.skip_role else 0
         for m in self.patterns[name].finditer(text):
             before = re.findall(r"[A-Za-z]+", text[:m.start()])
-            if before and before[-1].lower() in self.skip_after:
+            if m.start() < start:
+                role += 1
+            elif before and before[-1].lower() in self.skip_after:
                 verb += 1
             else:
                 noun.append(m)
-        return noun, verb
+        return noun, verb, role
 
     def applicable(self, story: Story) -> bool:
         return any(self._noun_matches(n, story.text)[0] for n in self.synonyms)
@@ -158,7 +173,7 @@ class Unambiguous:
         if not options:
             return None
         name = rng.choice(options)
-        matches, verb_uses = self._noun_matches(name, story.text)
+        matches, verb_uses, role_uses = self._noun_matches(name, story.text)
         text = story.text
         for m in reversed(matches):
             rep = self._replacement(m.group(0), name)
@@ -172,7 +187,8 @@ class Unambiguous:
             text = head + rep + text[m.end():]
         syn = self.synonyms[name]
         return Edit(text, {"class": name, "synonym": syn, "occurrences": len(matches),
-                           "skipped_verb_uses": verb_uses, "injected_terms": [syn]})
+                           "skipped_verb_uses": verb_uses, "skipped_role_uses": role_uses,
+                           "injected_terms": [syn]})
 
     def on_applied(self, e: Edit) -> None:
         name = e.details["class"]
@@ -207,9 +223,21 @@ class ProblemOriented:
 
     def __init__(self, rules, set_id, stories, gold_names, rng):
         self.phrases, self.excluded = _valid_phrases(rules, gold_names, rules.get("implementation_terms", []))
+        words = rules.get("exclude_if_means_ends_with_clause", [])
+        self.clause_re = re.compile(r"\b(" + "|".join(re.escape(w) for w in words) + r")\b", re.I) if words else None
+
+    def why_not(self, story) -> str | None:
+        m = parse_story(story.text)
+        if m is None:
+            return "템플릿대로 읽히지 않음"
+        tail = m.group("means").split(",")[-1]  # means의 마지막 마디
+        hit = self.clause_re.search(tail) if self.clause_re else None
+        if hit:
+            return f"means 끝이 종속절 ('{hit.group(1)}' …{tail.strip()[-40:]})"
+        return None
 
     def applicable(self, story):
-        return parse_story(story.text) is not None
+        return self.why_not(story) is None
 
     def edit(self, story, rng):
         m = parse_story(story.text)
@@ -357,9 +385,13 @@ def inject(set_id: str, stories: list[Story], gold_names: list[str], defect_type
         log.append(entry)
 
     meta = {"set": set_id, "type": defect_type, "seed": seed, "rate": rate, "status": "DRAFT",
+            "team_review": rules[defect_type].get("team_review", []),
             "n_stories": len(stories), "n_target": n_target, "n_eligible": len(eligible),
             "n_applied": applied, "n_reverted": reverted, "shortfall": n_target - applied,
             "excluded_rule_items": injector.excluded}
+    if hasattr(injector, "why_not"):
+        meta["ineligible_stories"] = [{"story": s.idx, "reason": injector.why_not(s)}
+                                      for s in stories if s not in eligible]
     if defect_type == "unambiguous":
         used = {e["synonym"]: e["class"] for e in log if e["status"] == "applied"}
         meta["synonym_map"] = used  # 채점 시 동의어 → 원래 클래스로 되돌리는 데 쓴다
@@ -377,7 +409,17 @@ def write_outputs(set_id: str, defect_type: str, seed: int, current: dict[int, s
     out = noisy_path(set_id, defect_type, seed)
     if out.exists():
         if out.read_text(encoding="utf-8") == text:
-            return "unchanged"
+            meta_path = out.with_suffix(".meta.json")
+            saved = json.loads(meta_path.read_text(encoding="utf-8"))
+            rules_sha = _sha256_file(rules_path)
+            if saved.get("rules_sha256") == rules_sha:
+                return "unchanged"
+            # 규칙 파일은 바뀌었지만 이 유형의 결과는 같다: 같은 결과를 현재 규칙으로 다시 만들었다는 사실만 남긴다
+            saved["rules_sha256_history"] = saved.get("rules_sha256_history", []) + [saved.get("rules_sha256")]
+            saved.update(rules_sha256=rules_sha, team_review=meta.get("team_review", []),
+                         rules_rechecked_at=datetime.now(timezone.utc).isoformat())
+            meta_path.write_text(json.dumps(saved, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            return "unchanged (규칙 해시 갱신)"
         raise RuntimeError(f"{out.relative_to(ROOT)}: 기존 수정본과 내용이 다르다 (규칙이나 입력이 바뀜). "
                            "기존 파일을 archive/로 옮긴 뒤 다시 실행한다")
     out.parent.mkdir(parents=True, exist_ok=True)
