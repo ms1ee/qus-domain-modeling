@@ -187,21 +187,53 @@ def _run_jobs(client_for, model_name, model_cfg, jobs, infos, session) -> None:
         try:
             record = extract(client_for(rep), load_input(set_id, input_id))
         except BaseException as e:
-            _append_jsonl("incidents.jsonl", {"at": _now(), "model": model_name, "set": set_id, "input": input_id,
-                                              "rep": rep, "error": f"{type(e).__name__}: {e}"})
+            _record_abort(e, model_name, model_cfg, set_id, input_id, rep, infos, session, started)
             print(f"  {model_name} {set_id} {input_id} rep{rep}: 중단 — {type(e).__name__}: {e}")
             raise
-        record.update(model_name=model_name, model_config=rep_model_config(model_cfg, rep), set=set_id, input=input_id, rep=rep,
+        record.update(model_name=model_name, model_config=rep_model_config(model_cfg, rep), set=set_id,
+                      input=input_id, rep=rep,
                       config=config_name(), input_info=infos[(set_id, input_id)], prompt_templates=prompt_hashes(),
-                      session=_session_meta(session), started_at=started, finished_at=_now())
+                      session=_session_meta(session), started_at=started, finished_at=_now(),
+                      aborted_attempts=_aborted_attempts(set_id, input_id, rep))
         _write_atomic(path, record)
         calls = record["calls"]
         cut = [t for t, c in calls.items() if c.get("truncated")]
         print(f"  {model_name} {set_id} {input_id} rep{rep}: "
               f"classes={len(record['classes'] or [])} associations={len(record['associations'] or [])}"
-              + "".join(f" {t}:{c['response']['output_tokens']}tok/{c['response']['elapsed_s']:.0f}s"
+              + "".join(f" {t}:{c['response']['output_tokens']}tok/{c['response']['elapsed_s'] or 0:.0f}s"
                         for t, c in calls.items())
               + (f" 절단={cut}" if cut else "") + (f" error={record['error']}" if record["error"] else ""))
+
+
+def incomplete_path(model_name: str, set_id: str, input_id: str, rep: int, at: str):
+    stamp = at.replace(":", "").replace("-", "").split(".")[0]
+    return runs_dir() / "incomplete" / model_name / set_id / input_id / f"rep{rep}-{stamp}.json"
+
+
+def _record_abort(e, model_name, model_cfg, set_id, input_id, rep, infos, session, started) -> None:
+    """중단된 실행: incidents.jsonl에 한 줄, 받은 응답이 있으면 incomplete/에 부분 기록 (완료 기록으로 치지 않는다)."""
+    at = _now()
+    incident = {"at": at, "model": model_name, "set": set_id, "input": input_id, "rep": rep,
+                "error": f"{type(e).__name__}: {e}", "memory": getattr(e, "snapshot", None)}
+    partial = getattr(e, "partial_record", None)
+    if partial and partial.get("calls"):
+        path = incomplete_path(model_name, set_id, input_id, rep, at)
+        _write_atomic(path, {**partial, "status": "aborted", "abort": incident, "model_name": model_name,
+                             "model_config": rep_model_config(model_cfg, rep), "set": set_id, "input": input_id,
+                             "rep": rep, "config": config_name(), "input_info": infos.get((set_id, input_id)),
+                             "prompt_templates": prompt_hashes(), "session": _session_meta(session),
+                             "started_at": started})
+        incident["partial_record"] = str(path.relative_to(runs_dir()))
+    _append_jsonl("incidents.jsonl", incident)
+
+
+def _aborted_attempts(set_id: str, input_id: str, rep: int) -> list[dict]:
+    """같은 실행의 이전 중단 기록 (incidents.jsonl). 재실행했다는 사실을 완료 기록에 남긴다."""
+    path = runs_dir() / "incidents.jsonl"
+    if not path.exists():
+        return []
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [r for r in rows if (r["set"], r["input"], r["rep"]) == (set_id, input_id, rep)]
 
 
 def _print_dry_run(todo: list[tuple], manifest: dict) -> None:

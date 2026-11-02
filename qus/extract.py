@@ -52,9 +52,20 @@ def _call_record(prompt: str, resp) -> dict:
 
 
 def extract(client, stories: list[Story]) -> dict:
-    """실행 기록 1건. 클래스 파싱에 실패하면 관계 호출은 하지 않는다."""
-    record = {"classes": None, "associations": None, "error": None, "calls": {}}
+    """실행 기록 1건. 클래스 파싱에 실패하면 관계 호출은 하지 않는다.
 
+    호출 도중 예외(메모리 압박으로 중단 등)가 나면 그때까지의 기록을 예외의 partial_record에 붙인다.
+    이미 받은 응답이 기록에서 빠지지 않게 하기 위해서다.
+    """
+    record = {"classes": None, "associations": None, "error": None, "calls": {}}
+    try:
+        return _extract(client, stories, record)
+    except BaseException as e:
+        e.partial_record = record
+        raise
+
+
+def _extract(client, stories: list[Story], record: dict) -> dict:
     prompt = build_class_prompt(stories)
     resp = client.complete(prompt)
     record["calls"]["classes"] = _call_record(prompt, resp)

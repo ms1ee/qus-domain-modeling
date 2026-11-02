@@ -168,3 +168,42 @@ def test_seed_list_gives_one_seed_per_repetition(smoke):
     assert runmod.rep_model_config({"seed": 5}, 2)["seed"] == 5
     with pytest.raises(ValueError, match="반복 수"):
         runmod.rep_model_config({"seed": [1, 2]}, 1)
+
+
+def test_abort_after_first_call_keeps_received_response_and_marks_rerun(smoke):
+    from qus.lmstudio import MemoryPressure
+
+    class PressureOnSecondCall:
+        def __init__(self):
+            self.n = 0
+
+        def complete(self, prompt):
+            self.n += 1
+            if self.n == 2:
+                raise MemoryPressure("실행 중 메모리 압박: 메모리 압박 단계 2 > 1", {"pressure_level": 2})
+            return LLMResponse('{"classes": ["Student"]}', "fake", "stop", 1, 1, {"id": "x"}, elapsed_s=0.1)
+
+    job = ("mistral-7b-local", {}, "school", "unambiguous", 3)
+    infos = {("school", "unambiguous"): {"input_sha256": "x"}}
+    client = PressureOnSecondCall()
+    with pytest.raises(MemoryPressure):
+        runmod._run_jobs(lambda rep: client, "mistral-7b-local", {}, [job], infos, None)
+    assert not runmod.run_path("mistral-7b-local", "school", "unambiguous", 3).exists()
+    incident = json.loads((runmod.runs_dir() / "incidents.jsonl").read_text().splitlines()[0])
+    assert incident["memory"] == {"pressure_level": 2}
+    partial = json.loads((runmod.runs_dir() / incident["partial_record"]).read_text())
+    assert partial["status"] == "aborted" and partial["calls"]["classes"]["response"]["raw"] == {"id": "x"}
+    assert "associations" not in partial["calls"]
+
+    class Fine:
+        def __init__(self):
+            self.n = 0
+
+        def complete(self, prompt):
+            self.n += 1
+            return LLMResponse('{"classes": ["Student"]}' if self.n == 1 else '{"associations": []}',
+                               "fake", "stop", 1, 1, {})
+    fine = Fine()
+    runmod._run_jobs(lambda rep: fine, "mistral-7b-local", {}, [job], infos, None)
+    rec = json.loads(runmod.run_path("mistral-7b-local", "school", "unambiguous", 3).read_text())
+    assert len(rec["aborted_attempts"]) == 1 and rec["aborted_attempts"][0]["error"].startswith("MemoryPressure")

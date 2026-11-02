@@ -32,7 +32,9 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 class MemoryPressure(RuntimeError):
-    pass
+    def __init__(self, msg: str, snapshot: dict | None = None):
+        super().__init__(msg)
+        self.snapshot = snapshot  # 압박을 감지한 시점의 메모리 측정값
 
 
 class ModelNotLoaded(RuntimeError):
@@ -150,9 +152,10 @@ def preflight(identifier: str, guard: dict, swap_baseline_gib: float):
     def check() -> None:
         if not _present(identifier, loaded_models()):
             raise ModelNotLoaded(f"'{identifier}'가 로드돼 있지 않다. JIT 로드를 피하려고 호출하지 않고 멈춘다")
-        problems = problems_while_running(memory_snapshot(), guard, swap_baseline_gib)
+        snap = memory_snapshot()
+        problems = problems_while_running(snap, guard, swap_baseline_gib)
         if problems:
-            raise MemoryPressure("실행 중 메모리 압박: " + "; ".join(problems))
+            raise MemoryPressure("실행 중 메모리 압박: " + "; ".join(problems), snap)
     return check
 
 
