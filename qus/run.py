@@ -27,8 +27,9 @@ def run_path(model_name: str, set_id: str, input_id: str, rep: int):
     return RUNS_DIR / model_name / set_id / input_id / f"rep{rep}.json"
 
 
-def plan(inputs: list[str]) -> list[tuple]:
+def plan(inputs: list[str] | None = None) -> list[tuple]:
     cfg = experiment_config()
+    inputs = inputs or cfg.get("inputs", ["original"])
     return [(model_name, model_cfg, set_id, input_id, rep)
             for model_name, model_cfg in role_models("extractors").items()
             for set_id in cfg["sets"]

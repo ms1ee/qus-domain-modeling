@@ -12,7 +12,7 @@ import re
 import openpyxl
 
 from .config import BENCHMARK_DIR, experiment_config, load_yaml
-from .data import GOLD_PATH, load_stories
+from .data import gold_path, load_stories
 from .text import normalize_term, singularize
 
 ORIGINAL_DIR = BENCHMARK_DIR / "gold" / "original"
@@ -113,6 +113,7 @@ def prepare() -> dict:
               f"associations={len(g['associations'])} excluded={len(g['excluded_associations'])}")
         for n in notes:
             print("  " + n)
-    GOLD_PATH.write_text(json.dumps(gold, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"wrote {GOLD_PATH.relative_to(BENCHMARK_DIR.parent)}")
+    out = gold_path()
+    out.write_text(json.dumps(gold, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote {out.relative_to(BENCHMARK_DIR.parent)}")
     return gold

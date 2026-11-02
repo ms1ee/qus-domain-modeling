@@ -60,3 +60,24 @@ def test_ticket_order_associations_excluded(gold):
 def test_counts(gold, set_id, n_classes, n_assoc):
     assert len(gold[set_id]["classes"]) == n_classes
     assert len(gold[set_id]["associations"]) == n_assoc
+
+
+def test_smoke_school_resolves_without_aliases():
+    """스모크 개발 세트 school: 정규화만으로 끝점이 모두 연결되고 제외되는 association이 없다."""
+    sheet = load_yaml("smoke.yaml")["sets"]["school"]
+    g, notes = build_set("school", sheet, load_yaml("gold_fixes.yaml"))
+    assert (len(g["classes"]), len(g["associations"]), len(g["excluded_associations"])) == (17, 23, 0)
+    assert not [n for n in notes if n.startswith("warning")]
+
+
+def test_smoke_config_uses_its_own_gold_file():
+    from qus.config import config_name, use_config
+    from qus.data import gold_path
+
+    assert gold_path().name == "gold.json"
+    use_config("smoke.yaml")
+    try:
+        assert gold_path().name == "gold_smoke.json"
+    finally:
+        use_config("experiment.yaml")
+    assert config_name() == "experiment.yaml"
