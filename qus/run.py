@@ -101,7 +101,18 @@ def plan(inputs: list[str] | None = None) -> list[tuple]:
             for model_name, model_cfg in role_models("extractors").items()
             for set_id in cfg["sets"]
             for input_id in inputs
-            for rep in range(1, cfg["repetitions"] + 1)]
+            for rep in range(1, repetitions(input_id, cfg) + 1)]
+
+
+def repetitions(input_id: str, cfg: dict | None = None) -> int:
+    """입력별 반복 수. repetitions_by_input에 있으면 그 값, 없으면 repetitions."""
+    cfg = cfg or experiment_config()
+    return (cfg.get("repetitions_by_input") or {}).get(input_id, cfg["repetitions"])
+
+
+def max_repetitions(cfg: dict | None = None) -> int:
+    cfg = cfg or experiment_config()
+    return max([cfg["repetitions"], *(cfg.get("repetitions_by_input") or {}).values()])
 
 
 def _append_jsonl(name: str, entry: dict) -> None:
@@ -145,7 +156,7 @@ def rep_model_config(model_cfg: dict, rep: int) -> dict:
     seed = model_cfg.get("seed")
     if not isinstance(seed, list):
         return model_cfg
-    n = experiment_config()["repetitions"]
+    n = max_repetitions()
     if len(seed) != n:
         raise ValueError(f"seed 목록 길이 {len(seed)}가 반복 수 {n}와 다르다")
     return {**model_cfg, "seed": seed[rep - 1]}

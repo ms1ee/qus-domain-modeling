@@ -1,7 +1,10 @@
 """스모크 결과 요약 — 숫자만 적고 판단은 하지 않는다.
 
-- 유형별 평균 F1, 원본 대비 Δ (= 유형 평균 − 원본 평균, 음수면 하락), 원본 3회의 표본표준편차 SD (n−1), Δ / SD
-- 실패한 실행은 (a) F1 = 0으로 포함, (b) 제외 두 방식으로 나란히 계산한다
+- 유형별 평균 F1(클래스는 정밀도·재현율도), 원본 대비 Δ (= 유형 평균 − 원본 평균, 음수면 하락),
+  원본 반복의 표본표준편차 SD (n−1), Δ / SD. 반복 3회 시점(rep1–3)과 전체 반복 시점을 나란히 둔다
+- 실패한 실행은 (a) 점수 = 0으로 포함, (b) 제외 두 방식으로 나란히 계산한다
+- unambiguous는 동의어 처리 두 방식을 나란히 둔다: 현재 기본 채점(주입 로그의 동의어 → 원래 클래스로 되돌림,
+  README 채점 규칙 2)과 되돌리지 않은 엄격 채점
 - 주입한 단어가 클래스로 뽑힌 수 (problem_oriented, minimal), 원래 용어와 동의어가 둘 다 뽑힌 수 (unambiguous)
   매칭: 예측 이름과 주입 용어를 normalize_term → vocab_key로 맞춘 뒤
     완전 일치 = 키가 같음, 부분 일치 = 단어가 하나라도 겹침 (DRAFT. 실제 이름 목록을 함께 남긴다)
@@ -45,31 +48,53 @@ def load_records() -> list[dict]:
     return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(runs_dir().glob("*/*/*/rep*.json"))]
 
 
-def f1_table(rows: list[dict], inputs: list[str]) -> list[dict]:
-    """입력 × 대상별 F1 요약. 원본 행의 SD로 Δ/SD를 계산한다."""
+def metric_table(rows: list[dict], inputs: list[str], target: str, metric: str = "f1",
+                 max_rep: int | None = None) -> list[dict]:
+    """입력별 지표 요약 (rep ≤ max_rep만). 원본(original) 행의 평균·SD로 Δ와 Δ/SD를 계산한다."""
     groups = defaultdict(list)
     for r in rows:
-        groups[(r["input"], r["target"])].append(r)
+        if r["target"] == target and (max_rep is None or r["rep"] <= max_rep):
+            groups[r["input"]].append(r)
+    out, base = [], {}
+    for input_id in inputs:
+        g = sorted(groups.get(input_id, []), key=lambda r: r["rep"])
+        excl = [r[metric] for r in g if r["status"] == "ok"]
+        incl = [r[metric] if r["status"] == "ok" else 0.0 for r in g]
+        row = {"target": target, "metric": metric, "scope": f"rep≤{max_rep}" if max_rep else "전체",
+               "input": input_id, "runs": len(g), "failed": len(g) - len(excl),
+               "truncated": sum(r["truncated"] == 1 for r in g),
+               "by_rep": [round(r[metric], 3) if r["status"] == "ok" else r["status"] for r in g],
+               "mean_incl0": _mean(incl), "mean_excl": _mean(excl), "sd_incl0": _sd(incl), "sd_excl": _sd(excl)}
+        if input_id == "original":
+            base = row
+        for mode in ("incl0", "excl"):
+            m, b, sd = row[f"mean_{mode}"], base.get(f"mean_{mode}"), base.get(f"sd_{mode}")
+            delta = None if m is None or b is None else m - b
+            row[f"delta_{mode}"] = delta
+            row[f"delta_over_sd_{mode}"] = None if delta is None or not sd else delta / sd
+        out.append(row)
+    return out
+
+
+def f1_table(rows: list[dict], inputs: list[str], max_rep: int | None = None) -> list[dict]:
+    """대상(클래스, 관계)별 F1 요약."""
     out = []
     for target in TARGETS:
-        base = {}
-        for input_id in inputs:
-            g = sorted(groups.get((input_id, target), []), key=lambda r: r["rep"])
-            excl = [r["f1"] for r in g if r["status"] == "ok"]
-            incl = [r["f1"] if r["status"] == "ok" else 0.0 for r in g]
-            row = {"target": target, "input": input_id, "runs": len(g), "failed": len(g) - len(excl),
-                   "truncated": sum(r["truncated"] == 1 for r in g),
-                   "f1_by_rep": [round(r["f1"], 3) if r["status"] == "ok" else r["status"] for r in g],
-                   "mean_incl0": _mean(incl), "mean_excl": _mean(excl),
-                   "sd_incl0": _sd(incl), "sd_excl": _sd(excl)}
-            if input_id == "original":
-                base = row
-            for mode in ("incl0", "excl"):
-                m, b, sd = row[f"mean_{mode}"], base.get(f"mean_{mode}"), base.get(f"sd_{mode}")
-                delta = None if m is None or b is None else m - b
-                row[f"delta_{mode}"] = delta
-                row[f"delta_over_sd_{mode}"] = None if delta is None or not sd else delta / sd
-            out.append(row)
+        for row in metric_table(rows, inputs, target, "f1", max_rep):
+            out.append({**row, "f1_by_rep": row["by_rep"]})
+    return out
+
+
+UNMAPPED = "unambiguous [동의어 되돌림 없음]"
+
+
+def unmapped_rows(records: list[dict], gold: dict, fixes: dict) -> list[dict]:
+    """unambiguous 실행을 동의어 되돌림 없이 채점한 행 (입력 이름을 UNMAPPED로 바꾼다)."""
+    out = []
+    for r in records:
+        if r["input"] == "unambiguous":
+            strict = {**r, "input_info": {**(r.get("input_info") or {}), "synonym_map": None}}
+            out += [{**row, "input": UNMAPPED} for row in score_record(strict, gold, fixes)]
     return out
 
 
@@ -107,14 +132,60 @@ def synonym_pair_counts(records: list[dict], set_id: str, seed: int) -> list[dic
     return out
 
 
-def _md_f1(rows: list[dict], target: str) -> list[str]:
-    lines = [f"| 입력 | 반복별 F1 | 실패 | 절단 | (a) 실패=0 평균 | Δ | Δ/SD | (b) 실패 제외 평균 | Δ | Δ/SD |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
-    for r in (r for r in rows if r["target"] == target):
-        sd = f" (SD {_fmt(r['sd_incl0'])} / {_fmt(r['sd_excl'])})" if r["input"] == "original" else ""
-        lines.append(f"| {r['input']}{sd} | {r['f1_by_rep']} | {r['failed']}/{r['runs']} | {r['truncated']} | "
-                     f"{_fmt(r['mean_incl0'])} | {_signed(r['delta_incl0'])} | {_signed(r['delta_over_sd_incl0'])} | "
-                     f"{_fmt(r['mean_excl'])} | {_signed(r['delta_excl'])} | {_signed(r['delta_over_sd_excl'])} |")
+def _pair(a, b, signed=False):
+    """(a) 값, (b)가 다르면 괄호로 덧붙인다."""
+    f = _signed if signed else _fmt
+    return f(a) if a == b or (a is not None and b is not None and abs(a - b) < 5e-4) else f"{f(a)} (b {f(b)})"
+
+
+def _md_prf(tables: dict, inputs: list[str]) -> list[str]:
+    """클래스 F1·정밀도·재현율 (전체 반복). tables[metric] = metric_table 결과."""
+    lines = ["| 입력 | n | F1 평균 | Δ | Δ/SD | 정밀도 평균 | Δ | Δ/SD | 재현율 평균 | Δ | Δ/SD |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
+    for i, input_id in enumerate(inputs):
+        cells = []
+        for metric in ("f1", "precision", "recall"):
+            r = tables[metric][i]
+            cells += [_pair(r["mean_incl0"], r["mean_excl"]), _pair(r["delta_incl0"], r["delta_excl"], True),
+                      _pair(r["delta_over_sd_incl0"], r["delta_over_sd_excl"], True)]
+        r = tables["f1"][i]
+        label = input_id
+        if input_id == "original":
+            label += " (SD " + " / ".join(_fmt(tables[m][i]["sd_incl0"]) for m in ("f1", "precision", "recall")) + ")"
+        lines.append(f"| {label} | {r['runs']}" + (f", 실패 {r['failed']}" if r["failed"] else "") + " | "
+                     + " | ".join(cells) + " |")
+    return lines
+
+
+def _md_prf_single(table: list[dict]) -> list[str]:
+    lines = ["| 입력 | n | 평균 | Δ | Δ/SD | 절단 |", "|---|---|---|---|---|---|"]
+    for r in table:
+        label = r["input"] + (f" (SD {_fmt(r['sd_incl0'])})" if r["input"] == "original" else "")
+        lines.append(f"| {label} | {r['runs']}" + (f", 실패 {r['failed']}" if r["failed"] else "") + " | "
+                     f"{_pair(r['mean_incl0'], r['mean_excl'])} | {_pair(r['delta_incl0'], r['delta_excl'], True)} | "
+                     f"{_pair(r['delta_over_sd_incl0'], r['delta_over_sd_excl'], True)} | {r['truncated']} |")
+    return lines
+
+
+def _md_by_rep(table: list[dict]) -> list[str]:
+    lines = ["| 입력 | 반복별 값 (rep1부터) |", "|---|---|"]
+    for r in table:
+        lines.append(f"| {r['input']} | {', '.join(str(v) for v in r['by_rep'])} |")
+    return lines
+
+
+def _md_ratio_by_scope(t3: dict, tall: dict, inputs: list[str]) -> list[str]:
+    """Δ/SD를 반복 3회 시점(rep1–3)과 전체 반복 시점으로 나란히."""
+    keys = [("classes", "f1"), ("classes", "precision"), ("classes", "recall"), ("associations", "f1")]
+    head = " | ".join(f"{'클래스' if t == 'classes' else '관계'} {m} 3회 | 전체" for t, m in keys)
+    lines = [f"| 입력 | 반복 수 | {head} |", "|---" * (2 + 2 * len(keys)) + "|"]
+    for i, input_id in enumerate(inputs):
+        cells = []
+        for k in keys:
+            a, b = t3[k][i], tall[k][i]
+            cells += [_pair(a["delta_over_sd_incl0"], a["delta_over_sd_excl"], True),
+                      _pair(b["delta_over_sd_incl0"], b["delta_over_sd_excl"], True)]
+        lines.append(f"| {input_id} | {tall[('classes', 'f1')][i]['runs']} | " + " | ".join(cells) + " |")
     return lines
 
 
@@ -123,31 +194,50 @@ def summarize() -> None:
     (set_id,) = cfg["sets"]  # 스모크 요약은 세트 하나를 전제로 한다
     gold, fixes = load_gold(), load_yaml("gold_fixes.yaml")
     records = [r for r in load_records() if r["set"] == set_id]
-    rows = [row for r in records for row in score_record(r, gold, fixes)]
-    table = f1_table(rows, cfg["inputs"])
+    base_rows = [row for r in records for row in score_record(r, gold, fixes)]
+    rows = list(base_rows)
+    inputs = list(cfg["inputs"])
+    if "unambiguous" in inputs:
+        rows += unmapped_rows(records, gold, fixes)
+        inputs.insert(inputs.index("unambiguous") + 1, UNMAPPED)
+    keys = [("classes", "f1"), ("classes", "precision"), ("classes", "recall"), ("associations", "f1")]
+    tall = {k: metric_table(rows, inputs, *k) for k in keys}
+    t3 = {k: metric_table(rows, inputs, *k, max_rep=3) for k in keys}
     terms = injected_term_counts(records, set_id, cfg["seed"])
     pairs = synonym_pair_counts(records, set_id, cfg["seed"])
-    failures = failure_summary(rows)
+    failures = failure_summary(base_rows)
 
     stem = RESULTS_DIR / cfg.get("scores_file", "summary.csv").replace(".csv", "_summary")
     RESULTS_DIR.mkdir(exist_ok=True)
-    fields = ["target", "input", "runs", "failed", "truncated", "f1_by_rep", "mean_incl0", "delta_incl0",
-              "delta_over_sd_incl0", "sd_incl0", "mean_excl", "delta_excl", "delta_over_sd_excl", "sd_excl"]
+    fields = ["target", "metric", "scope", "input", "runs", "failed", "truncated", "by_rep", "mean_incl0",
+              "delta_incl0", "delta_over_sd_incl0", "sd_incl0", "mean_excl", "delta_excl", "delta_over_sd_excl",
+              "sd_excl"]
     with open(f"{stem}.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
-        w.writerows(table)
+        for k in keys:
+            w.writerows(t3[k] + tall[k])
     for name, data in (("injected_terms", terms), ("synonym_pairs", pairs)):
         with open(f"{stem}_{name}.json", "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
     paper = (cfg.get("paper_reference") or {}).get(set_id)
-    orig = next(r for r in table if r["target"] == "classes" and r["input"] == "original")
+    orig = next(r for r in tall[("classes", "f1")] if r["input"] == "original")
+    n_rep = {i: tall[("classes", "f1")][k]["runs"] for k, i in enumerate(inputs)}
     md = [f"# 스모크 결과 요약 — {set_id} (숫자만, 판단 없음)", "",
-          f"실행 기록 {len(records)}건. Δ = 유형 평균 − 원본 평균 (음수면 하락). SD = 원본 3회 표본표준편차(n−1), "
-          "괄호 안은 (a)/(b). (a) 실패 실행을 F1 = 0으로 포함, (b) 실패 실행 제외.", "",
-          "## 클래스 F1", "", *_md_f1(table, "classes"), "",
-          "## 관계 F1", "", *_md_f1(table, "associations"), "",
+          f"실행 기록 {len(records)}건 (입력별 반복 수: " + ", ".join(f"{i} {n}" for i, n in n_rep.items() if i != UNMAPPED)
+          + "). Δ = 유형 평균 − 원본 평균 (음수면 하락). SD = 원본 반복의 표본표준편차(n−1). "
+          "값은 (a) 실패 실행을 0점으로 포함한 것이고, (b) 실패 실행을 뺀 값이 다르면 괄호로 적었다.", "",
+          f"`{UNMAPPED}` 행은 unambiguous 실행을 동의어 되돌림 없이 채점한 것이다. `unambiguous` 행은 현재 기본 채점"
+          " (주입 로그의 원래 용어 → 동의어 대응으로 동의어를 원래 정답 클래스로 되돌림, README 채점 규칙 2)이며,"
+          " 요청된 '보조 지표(DRAFT)'와 같은 정의다. 어느 쪽을 기본으로 둘지는 미정이다.", "",
+          "## 클래스: F1·정밀도·재현율 (전체 반복)", "", *_md_prf({m: tall[("classes", m)] for m in ("f1", "precision", "recall")}, inputs), "",
+          "## Δ/SD: 반복 3회 시점(rep1–3)과 전체 반복", "",
+          "3회 열은 rep1–3만으로, 전체 열은 모든 반복으로 원본 평균·SD와 유형 평균을 다시 계산한 값이다.", "",
+          *_md_ratio_by_scope(t3, tall, inputs), "",
+          "## 관계 F1 (전체 반복)", "", *_md_prf_single(tall[("associations", "f1")]), "",
+          "## 반복별 값", "", "### 클래스 F1", "", *_md_by_rep(tall[("classes", "f1")]), "",
+          "### 관계 F1", "", *_md_by_rep(tall[("associations", "f1")]), "",
           "## 실패·절단 (대상별)", "", "| 입력 | 대상 | 실행 | 성공 | 파싱 실패 | 호출 안 함 | 실패율 | 절단 |",
           "|---|---|---|---|---|---|---|---|"]
     for f_ in failures:

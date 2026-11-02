@@ -76,10 +76,12 @@ def smoke(tmp_path, monkeypatch):
     use_config("experiment.yaml")
 
 
-def test_smoke_plan_is_six_inputs_times_three(smoke):
+def test_smoke_plan_is_five_inputs_times_ten_plus_full_sentence_three(smoke):
     jobs = runmod.plan()
-    assert len(jobs) == 18 and {j[3] for j in jobs} == {"original", "unambiguous", "problem_oriented", "minimal",
-                                                        "uniform", "full_sentence"}
+    assert len(jobs) == 5 * 10 + 3 and {j[3] for j in jobs} == {"original", "unambiguous", "problem_oriented",
+                                                                "minimal", "uniform", "full_sentence"}
+    assert max(j[4] for j in jobs if j[3] == "full_sentence") == 3
+    assert max(j[4] for j in jobs if j[3] == "original") == 10
     assert {j[0] for j in jobs} == {"mistral-7b-local"}
 
 
@@ -157,14 +159,14 @@ def test_dry_run_writes_nothing(smoke, monkeypatch, capsys):
                         lambda: {"available_gib": 7.0, "swap_used_gib": 1.0, "pressure_level": 1})
     runmod.run(dry_run=True)
     out = capsys.readouterr().out
-    assert "18개 남음 (호출 최대 36회)" in out and "로드 전 검사 통과" in out and "TODO" not in out
-    assert "'temperature': 0.7" in out and "'seed': [1, 2, 3]" in out and "top_k" in out
+    assert "53개 남음 (호출 최대 106회)" in out and "로드 전 검사 통과" in out and "TODO" not in out
+    assert "'temperature': 0.7" in out and "'seed': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]" in out and "top_k" in out
     assert not runmod.runs_dir().exists()
 
 
 def test_seed_list_gives_one_seed_per_repetition(smoke):
-    cfg = {"provider": "openai_compatible", "seed": [11, 12, 13]}
-    assert [runmod.rep_model_config(cfg, r)["seed"] for r in (1, 2, 3)] == [11, 12, 13]
+    cfg = {"provider": "openai_compatible", "seed": list(range(11, 21))}
+    assert [runmod.rep_model_config(cfg, r)["seed"] for r in (1, 2, 10)] == [11, 12, 20]
     assert runmod.rep_model_config({"seed": 5}, 2)["seed"] == 5
     with pytest.raises(ValueError, match="반복 수"):
         runmod.rep_model_config({"seed": [1, 2]}, 1)

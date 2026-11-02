@@ -57,3 +57,36 @@ def test_synonym_pairs_both_and_synonym_only(smoke):
                               "school", 2026)
     assert out[0]["both"] == 1 and out[0]["both_names"] == ["student/learner"]
     assert "class/course" in out[0]["synonym_only_names"]
+
+
+def _prf(input_id, rep, f1, p, r, status="ok", target="classes"):
+    row = {"input": input_id, "target": target, "rep": rep, "status": status, "truncated": 0}
+    if status == "ok":
+        row.update(f1=f1, precision=p, recall=r)
+    return row
+
+
+def test_metric_table_precision_recall_and_rep_scope():
+    rows = [_prf("original", i, 0.5 + i / 100, 0.4, 0.6 + i / 100) for i in range(1, 11)] + \
+           [_prf("minimal", i, 0.4, 0.3 + i / 100, 0.5) for i in range(1, 11)]
+    p3 = summary.metric_table(rows, ["original", "minimal"], "classes", "precision", max_rep=3)
+    pall = summary.metric_table(rows, ["original", "minimal"], "classes", "precision")
+    assert p3[1]["runs"] == 3 and pall[1]["runs"] == 10 and p3[0]["scope"] == "rep≤3"
+    assert p3[1]["mean_excl"] == pytest.approx(0.32) and pall[1]["mean_excl"] == pytest.approx(0.355)
+    r3 = summary.metric_table(rows, ["original", "minimal"], "classes", "recall", max_rep=3)
+    assert r3[1]["delta_excl"] == pytest.approx(0.5 - 0.62)
+    assert r3[1]["delta_over_sd_excl"] == pytest.approx((0.5 - 0.62) / 0.01)
+    assert summary.metric_table(rows, ["original"], "classes", "precision")[0]["delta_over_sd_excl"] is None  # SD 0
+
+
+def test_unmapped_rows_score_synonyms_as_false_positives(smoke):
+    from qus.config import load_yaml
+    from qus.data import load_gold
+    rec = {"model_name": "m", "set": "school", "input": "unambiguous", "rep": 1, "error": None,
+           "classes": ["Learner", "Teacher"], "associations": [], "calls": {"classes": {"prompt": "p", "response": {}}},
+           "input_info": {"synonym_map": {"learner": "student"}}}
+    gold, fixes = load_gold(), load_yaml("gold_fixes.yaml")
+    mapped = summary.score_record(rec, gold, fixes)[0]
+    strict = summary.unmapped_rows([rec], gold, fixes)[0]
+    assert strict["input"] == summary.UNMAPPED
+    assert (mapped["tp"], mapped["fp"]) == (2, 0) and (strict["tp"], strict["fp"]) == (1, 1)
