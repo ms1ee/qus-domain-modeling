@@ -19,7 +19,7 @@ from collections import defaultdict
 
 from .config import ROOT, experiment_config, load_yaml
 from .data import load_gold
-from .inject import load_meta, noisy_path
+from .inject import load_meta, noisy_path, split_input
 from .run import RESULTS_DIR, failure_summary, runs_dir, score_record
 from .text import normalize_term, vocab_key
 
@@ -116,22 +116,61 @@ def unmapped_rows(records: list[dict], gold: dict, fixes: dict) -> list[dict]:
     return out
 
 
-def injected_term_counts(records: list[dict], set_id: str, seed: int) -> list[dict]:
-    """problem_oriented, minimal 실행에서 주입 용어가 클래스로 뽑힌 수. 같은 용어로 원본 실행도 센다."""
+CONTAMINATION_TYPES = ("problem_oriented", "minimal")  # 주입 단어가 도메인 밖 용어인 유형
+
+
+def _applied_terms(set_id: str, input_id: str, seed: int) -> list[str]:
+    path = noisy_path(set_id, input_id, seed).with_suffix(".jsonl")
+    log = [json.loads(line) for line in path.open(encoding="utf-8")]
+    return sorted({term for e in log if e["status"] == "applied" for term in e["injected_terms"]})
+
+
+def injected_term_counts(records: list[dict], set_id: str, seed: int, inputs: list[str] | None = None) -> list[dict]:
+    """problem_oriented·minimal 계열 입력(비율 변형 포함)에서 주입 용어가 클래스로 뽑힌 수.
+
+    각 입력은 자기 주입 로그의 용어로 센다. 원본(original) 기준선은 그 유형이 모든 비율에서 쓴 용어의 합집합으로 센다.
+    """
+    inputs = inputs or list(CONTAMINATION_TYPES)
+    groups = defaultdict(list)
+    for i in inputs:
+        if split_input(i)[0] in CONTAMINATION_TYPES:
+            groups[split_input(i)[0]].append(i)
     out = []
-    for t in ("problem_oriented", "minimal"):
-        log = [json.loads(line) for line in noisy_path(set_id, t, seed).with_suffix(".jsonl").open(encoding="utf-8")]
-        terms = sorted({term for e in log if e["status"] == "applied" for term in e["injected_terms"]})
-        keys = {_key(term) for term in terms}
+
+    def count(term_list, input_id, label):
+        keys = {_key(term) for term in term_list}
         words = {w for k in keys for w in k.split()}
-        for input_id in (t, "original"):
-            for r in sorted((r for r in records if r["input"] == input_id), key=lambda r: r["rep"]):
-                preds = r["classes"] or []
-                exact = [p for p in preds if _key(p) in keys]
-                partial = [p for p in preds if p not in exact and set(_key(p).split()) & words]
-                out.append({"terms_from": t, "input": input_id, "rep": r["rep"], "parsed": r["classes"] is not None,
-                            "n_classes": len(preds), "exact": len(exact), "partial": len(partial),
-                            "exact_names": exact, "partial_names": partial, "terms": terms})
+        for r in sorted((r for r in records if r["input"] == input_id), key=lambda r: r["rep"]):
+            preds = r["classes"] or []
+            exact = [p for p in preds if _key(p) in keys]
+            partial = [p for p in preds if p not in exact and set(_key(p).split()) & words]
+            out.append({"terms_from": label, "input": input_id, "rep": r["rep"], "parsed": r["classes"] is not None,
+                        "n_classes": len(preds), "exact": len(exact), "partial": len(partial),
+                        "exact_names": exact, "partial_names": partial, "terms": term_list})
+
+    for base, ids in groups.items():
+        union = set()
+        for i in ids:
+            terms = _applied_terms(set_id, i, seed)
+            union |= set(terms)
+            count(terms, i, i)
+        count(sorted(union), "original", base)
+    return out
+
+
+def contamination_table(terms: list[dict]) -> list[dict]:
+    """입력별 실행당 완전 일치 수 평균과 1개 이상인 실행 비율 (파싱 실패한 실행은 분모에서 뺀다)."""
+    groups = defaultdict(list)
+    for t in terms:
+        if t["parsed"]:
+            groups[(t["terms_from"], t["input"])].append(t)
+    out = []
+    for (src, input_id), g in groups.items():
+        exact = [t["exact"] for t in g]
+        names = sorted({n for t in g for n in t["exact_names"]}, key=str.lower)
+        out.append({"terms_from": src, "input": input_id, "runs": len(g), "exact_by_rep": exact,
+                    "mean_exact": _mean(exact), "share_runs_with_any": sum(x > 0 for x in exact) / len(g),
+                    "mean_partial": _mean([t["partial"] for t in g]), "names": names})
     return out
 
 
@@ -199,6 +238,54 @@ def _md_cache(cache: dict, inputs: list[str]) -> list[str]:
     return lines
 
 
+def dose_table(tall: dict, contamination: list[dict], inputs: list[str], set_id: str, seed: int) -> list[dict]:
+    """유형 × 주입 비율(0/기본/변형)별 평균 클래스 F1·정밀도·재현율·오염 수."""
+    by_input = {m: {r["input"]: r for r in tall[("classes", m)]} for m in ("f1", "precision", "recall")}
+    cont = {(c["terms_from"], c["input"]): c for c in contamination}
+    out = []
+    bases = [i for i in inputs if "@" not in i and any(split_input(j)[0] == i and "@" in j for j in inputs)]
+    for base in bases:
+        levels = [("original", 0.0, None)] + [(i, None, None) for i in inputs if split_input(i)[0] == base]
+        for input_id, rate, _ in levels:
+            if input_id == "original":
+                c = cont.get((base, "original"))
+                target, actual = 0.0, 0.0
+            else:
+                meta = load_meta(set_id, input_id, seed)
+                c = cont.get((input_id, input_id))
+                target, actual = meta["rate"], meta["n_applied"] / meta["n_stories"]
+            row = {"type": base, "input": input_id, "target_rate": target, "actual_rate": actual,
+                   "runs": by_input["f1"][input_id]["runs"]}
+            for m in ("f1", "precision", "recall"):
+                row[f"{m}_incl0"], row[f"{m}_excl"] = by_input[m][input_id]["mean_incl0"], by_input[m][input_id]["mean_excl"]
+            row["contamination"] = c["mean_exact"] if c and base in CONTAMINATION_TYPES else None
+            row["share_with_any"] = c["share_runs_with_any"] if c and base in CONTAMINATION_TYPES else None
+            out.append(row)
+    return sorted(out, key=lambda r: (bases.index(r["type"]), r["target_rate"]))
+
+
+def _md_dose(rows: list[dict]) -> list[str]:
+    lines = ["| 유형 | 목표 비율 | 실제 비율 | n | 클래스 F1 | 정밀도 | 재현율 | 오염 (실행당 완전 일치) | 오염 ≥1 실행 비율 |",
+             "|---|---|---|---|---|---|---|---|---|"]
+    for r in rows:
+        cont = "–" if r["contamination"] is None else f"{r['contamination']:.2f}"
+        share = "–" if r["share_with_any"] is None else f"{r['share_with_any']:.0%}"
+        lines.append(f"| {r['type']} | {r['target_rate']:.0%} | {r['actual_rate']:.1%} | {r['runs']} | "
+                     f"{_pair(r['f1_incl0'], r['f1_excl'])} | {_pair(r['precision_incl0'], r['precision_excl'])} | "
+                     f"{_pair(r['recall_incl0'], r['recall_excl'])} | {cont} | {share} |")
+    return lines
+
+
+def _md_contamination(rows: list[dict]) -> list[str]:
+    lines = ["| 용어 출처 | 입력 | 실행 | 실행당 완전 일치 평균 | 1개 이상 실행 비율 | 반복별 완전 일치 수 | 부분 일치 평균 | 뽑힌 이름 (완전 일치) |",
+             "|---|---|---|---|---|---|---|---|"]
+    for r in rows:
+        lines.append(f"| {r['terms_from']} | {r['input']} | {r['runs']} | {r['mean_exact']:.2f} | "
+                     f"{r['share_runs_with_any']:.0%} | {r['exact_by_rep']} | {r['mean_partial']:.2f} | "
+                     f"{', '.join(r['names']) or '–'} |")
+    return lines
+
+
 def _md_by_rep(table: list[dict]) -> list[str]:
     lines = ["| 입력 | 반복별 값 (rep1부터) |", "|---|---|"]
     for r in table:
@@ -235,7 +322,9 @@ def summarize() -> None:
     keys = [("classes", "f1"), ("classes", "precision"), ("classes", "recall"), ("associations", "f1")]
     tall = {k: metric_table(rows, inputs, *k) for k in keys}
     t3 = {k: metric_table(rows, inputs, *k, max_rep=3) for k in keys}
-    terms = injected_term_counts(records, set_id, cfg["seed"])
+    terms = injected_term_counts(records, set_id, cfg["seed"], cfg["inputs"])
+    contamination = contamination_table(terms)
+    dose = dose_table(tall, contamination, cfg["inputs"], set_id, cfg["seed"])
     pairs = synonym_pair_counts(records, set_id, cfg["seed"])
     failures = failure_summary(base_rows)
     cache = cache_counts(records)
@@ -250,7 +339,8 @@ def summarize() -> None:
         w.writeheader()
         for k in keys:
             w.writerows(t3[k] + tall[k])
-    for name, data in (("injected_terms", terms), ("synonym_pairs", pairs)):
+    for name, data in (("injected_terms", terms), ("synonym_pairs", pairs), ("dose", dose),
+                       ("contamination", contamination)):
         with open(f"{stem}_{name}.json", "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -279,14 +369,16 @@ def summarize() -> None:
     for f_ in failures:
         md.append(f"| {f_['input']} | {f_['target']} | {f_['runs']} | {f_['ok']} | {f_['parse_failed']} | "
                   f"{f_['not_called']} | {f_['failure_rate']:.2f} | {f_['truncated']} |")
-    md += ["", "## 주입 단어가 클래스로 뽑힌 수", "",
+    if dose:
+        md += ["", "## 용량-반응: 주입 비율별 평균 (0% = 원본)", "",
+               "실제 비율 = 고친 스토리 수 / 61. 목표와 다르면 규칙상 적용 가능한 스토리가 모자란 것이다 (아래 주입 현황).",
+               "오염 = 주입한 비도메인 용어(구현·메타 용어)가 클래스로 뽑힌 수, 완전 일치 기준. 0% 행은 그 유형이 모든 비율에서"
+               " 쓴 용어로 원본 실행을 센 기준선이다. unambiguous의 주입 단어(동의어)는 도메인 용어라 오염에 넣지 않았다.", "",
+               *_md_dose(dose)]
+    md += ["", "## 비도메인 용어 오염 (problem_oriented·minimal 계열)", "",
            "완전 일치 = 정규화한 이름이 주입 용어와 같음, 부분 일치 = 주입 용어의 단어가 하나라도 겹침 (DRAFT 규칙). "
-           "original 행은 같은 용어 집합으로 원본 입력 실행을 센 기준선이다.", "",
-           "| 용어 출처 | 입력 | 반복 | 뽑힌 클래스 수 | 완전 일치 | 부분 일치 | 이름 |", "|---|---|---|---|---|---|---|"]
-    for t in terms:
-        names = ", ".join(t["exact_names"] + [f"~{n}" for n in t["partial_names"]]) or "–"
-        md.append(f"| {t['terms_from']} | {t['input']} | {t['rep']} | {t['n_classes'] if t['parsed'] else '파싱 실패'} | "
-                  f"{t['exact']} | {t['partial']} | {names} |")
+           "파싱에 실패한 실행은 분모에서 뺐다. 실행별 자세한 목록은 `_injected_terms.json`.", "",
+           *_md_contamination(contamination)]
     md += ["", "## unambiguous: 원래 용어와 동의어가 둘 다 뽑힌 수", "",
            "| 반복 | 주입 쌍 | 둘 다 | 동의어만 | 원래 용어만 | 둘 다 뽑힌 쌍 | 동의어만 뽑힌 쌍 |", "|---|---|---|---|---|---|---|"]
     for p in pairs:

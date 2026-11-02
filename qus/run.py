@@ -11,13 +11,14 @@ import csv
 import hashlib
 import json
 import os
+import statistics
 from collections import defaultdict
 from datetime import datetime, timezone
 
 from .config import BENCHMARK_DIR, ROOT, config_name, experiment_config, load_yaml
 from .data import load_gold, read_story_file
 from .extract import PROMPT_DIR, build_class_prompt, extract
-from .inject import DEFECT_TYPES, load_meta, noisy_path
+from .inject import DEFECT_TYPES, load_meta, noisy_path, split_input
 from .llm import TRUNCATION_REASONS, OpenAICompatibleClient, make_client, role_models
 from .score import Matcher, score_associations, score_classes
 
@@ -44,7 +45,7 @@ def run_path(model_name: str, set_id: str, input_id: str, rep: int):
 def input_path(set_id: str, input_id: str):
     if input_id == "original":
         return BENCHMARK_DIR / "stories" / f"{set_id}.txt"
-    if input_id in DEFECT_TYPES:
+    if split_input(input_id)[0] in DEFECT_TYPES:  # 결함 유형 또는 비율 변형 (예: minimal@50)
         return noisy_path(set_id, input_id, experiment_config()["seed"])
     raise ValueError(f"알 수 없는 입력 '{input_id}'")
 
@@ -294,7 +295,11 @@ def _print_dry_run(todo: list[tuple], manifest: dict) -> None:
         lm_cfg = model_cfg.get("lmstudio")
         if lm_cfg:
             _print_lmstudio_plan(lm_cfg)
-    print("\n입력별 클래스 프롬프트 크기 (토큰 수는 글자 수 / 4 로 어림, 미확인):")
+    ratio, assoc_extra = _observed_prompt_ratio()
+    n_ctx = max(((m.get("lmstudio") or {}).get("context_length", 0) for _, m, *_ in todo), default=0)
+    max_tokens = max((m.get("max_tokens") or 0 for _, m, *_ in todo), default=0)
+    print(f"\n입력별 주입 현황과 클래스 프롬프트 크기 (토큰 = 글자 수 / {ratio:.2f}, 기존 기록에서 잰 비율. "
+          f"관계 프롬프트는 클래스 프롬프트 + 최대 {assoc_extra} 토큰으로 어림):")
     for set_id, input_id in sorted({(j[2], j[3]) for j in todo}):
         try:
             info = input_info(set_id, input_id)
@@ -302,8 +307,33 @@ def _print_dry_run(todo: list[tuple], manifest: dict) -> None:
             print(f"  {set_id}/{input_id}: 입력 문제 — {e}")
             continue
         n = len(build_class_prompt(load_input(set_id, input_id)))
-        applied = info.get("injection", {}).get("n_applied", "-")
-        print(f"  {set_id}/{input_id}: {n}자 ≈ {n // 4} 토큰, 수정 스토리 {applied}, 입력 sha256 {info['input_sha256'][:12]}…")
+        est = round(n / ratio)
+        inj = info.get("injection")
+        if inj:
+            meta = load_meta(set_id, input_id, experiment_config()["seed"])
+            dose = (f"목표 {inj['rate']:.0%} ({inj['n_target']}/{info['n_stories']}) → 실제 "
+                    f"{inj['n_applied'] / info['n_stories']:.1%} ({inj['n_applied']}), 되돌림 {meta['n_reverted']}, "
+                    f"부족 {meta['shortfall']}")
+        else:
+            dose = "원본"
+        worst = est + assoc_extra + max_tokens
+        flag = f" ⚠ 관계 호출 어림 {worst} > n_ctx {n_ctx}" if n_ctx and worst > n_ctx else ""
+        print(f"  {set_id}/{input_id}: {dose} | {n}자 ≈ {est} 토큰{flag} | 입력 sha256 {info['input_sha256'][:12]}…")
+
+
+def _observed_prompt_ratio() -> tuple[float, int]:
+    """기존 실행 기록에서 (클래스 프롬프트 글자/토큰 비율, 관계 − 클래스 프롬프트 토큰 차의 최댓값). 없으면 (4.0, 300)."""
+    ratios, extra = [], []
+    for path in runs_dir().glob("*/*/*/rep*.json"):
+        r = json.loads(path.read_text(encoding="utf-8"))
+        c, a = r["calls"].get("classes"), r["calls"].get("associations")
+        if c and c["response"].get("input_tokens"):
+            ratios.append(len(c["prompt"]) / c["response"]["input_tokens"])
+            if a and a["response"].get("input_tokens"):
+                extra.append(a["response"]["input_tokens"] - c["response"]["input_tokens"])
+    if not ratios:
+        return 4.0, 300
+    return statistics.median(ratios), max(max(extra, default=300), 0)
 
 
 def _print_lmstudio_plan(lm_cfg: dict) -> None:

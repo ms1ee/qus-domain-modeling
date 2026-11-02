@@ -42,8 +42,29 @@ def role_end(text: str) -> int:
     return m.end("role") if m else 0
 
 
-def noisy_path(set_id: str, defect_type: str, seed: int) -> Path:
-    return NOISY_DIR / set_id / defect_type / f"seed{seed}.txt"
+def noisy_path(set_id: str, input_id: str, seed: int) -> Path:
+    """수정본 경로. input_id는 결함 유형(기본 주입 비율) 또는 '<유형>@<백분율>' (비율 변형, 예: minimal@50)."""
+    return NOISY_DIR / set_id / input_id / f"seed{seed}.txt"
+
+
+def split_input(input_id: str) -> tuple[str, float | None]:
+    """'problem_oriented@50' -> ('problem_oriented', 0.5). '@'가 없으면 (input_id, None)."""
+    if "@" not in input_id:
+        return input_id, None
+    base, pct = input_id.split("@", 1)
+    return base, int(pct) / 100
+
+
+def variant_id(defect_type: str, rate: float) -> str:
+    return f"{defect_type}@{round(rate * 100)}"
+
+
+def injection_inputs(cfg: dict) -> list[tuple[str, str, float]]:
+    """(입력 id, 결함 유형, 주입 비율) 목록: 기본 비율의 defect_types + dose.types × dose.rates 변형."""
+    out = [(t, t, cfg["injection_rate"]) for t in cfg["defect_types"]]
+    dose = cfg.get("dose") or {}
+    out += [(variant_id(t, r), t, r) for t in dose.get("types", []) for r in dose.get("rates", [])]
+    return out
 
 
 def parse_story(text: str):
@@ -385,6 +406,7 @@ def inject(set_id: str, stories: list[Story], gold_names: list[str], defect_type
         log.append(entry)
 
     meta = {"set": set_id, "type": defect_type, "seed": seed, "rate": rate, "status": "DRAFT",
+            "actual_rate": applied / len(stories),  # 실제로 고친 스토리 비율 (목표와 다를 수 있다)
             "team_review": rules[defect_type].get("team_review", []),
             "n_stories": len(stories), "n_target": n_target, "n_eligible": len(eligible),
             "n_applied": applied, "n_reverted": reverted, "shortfall": n_target - applied,
@@ -446,10 +468,15 @@ def inject_all(types: list[str] | None = None) -> None:
     for set_id in cfg["sets"]:
         stories = load_stories(set_id)
         names = [c["name"] for c in gold[set_id]["classes"]]
-        for t in types or cfg["defect_types"]:
-            current, log, meta = inject(set_id, stories, names, t, cfg["injection_rate"], cfg["seed"], rules)
-            state = write_outputs(set_id, t, cfg["seed"], current, log, meta,
+        for input_id, t, rate in injection_inputs(cfg):
+            if types and input_id not in types:
+                continue
+            # 난수 키는 비율과 상관없이 같다 (seed:세트:유형) → 높은 비율은 낮은 비율의 수정을 같은 순서로 포함한다
+            current, log, meta = inject(set_id, stories, names, t, rate, cfg["seed"], rules)
+            meta["input_id"] = input_id
+            state = write_outputs(set_id, input_id, cfg["seed"], current, log, meta,
                                   BENCHMARK_DIR / "stories" / f"{set_id}.txt", rules_path)
-            print(f"[{set_id}/{t}] {state}: 대상 {meta['n_target']} 적용 {meta['n_applied']} "
+            print(f"[{set_id}/{input_id}] {state}: 목표 {meta['n_target']}/{meta['n_stories']} ({rate:.0%}) "
+                  f"적용 {meta['n_applied']} (실제 {meta['n_applied'] / meta['n_stories']:.1%}) "
                   f"되돌림 {meta['n_reverted']} 부족 {meta['shortfall']} (적용 가능 {meta['n_eligible']}) "
                   f"규칙 항목 제외 {len(meta['excluded_rule_items'])}")

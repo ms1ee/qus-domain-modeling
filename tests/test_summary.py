@@ -99,3 +99,28 @@ def test_cache_counts_use_recorded_server_info():
     assert c[("original", "classes")]["전체 재사용"] == 1 and c[("original", "associations")]["부분 재사용"] == 1
     line = summary._md_cache(c, ["original"])[0]
     assert line.endswith("| 2/2 (100%) |")
+
+
+def test_contamination_table_counts_runs_with_any_and_skips_parse_failures():
+    terms = [{"terms_from": "minimal@50", "input": "minimal@50", "rep": i, "parsed": i != 3, "exact": e,
+              "partial": 0, "exact_names": ["Sprint"] * e} for i, e in ((1, 2), (2, 0), (3, 0), (4, 1))]
+    (row,) = summary.contamination_table(terms)
+    assert row["runs"] == 3 and row["exact_by_rep"] == [2, 0, 1]
+    assert row["mean_exact"] == pytest.approx(1.0) and row["share_runs_with_any"] == pytest.approx(2 / 3)
+    assert row["names"] == ["Sprint"]
+
+
+def test_dose_table_uses_actual_rates_and_baseline(smoke):
+    inputs = ["original", "problem_oriented", "problem_oriented@100", "uniform"]
+    rows = [_prf("original", 1, 0.5, 0.4, 0.6), _prf("problem_oriented", 1, 0.45, 0.4, 0.5),
+            _prf("problem_oriented@100", 1, 0.3, 0.2, 0.4), _prf("uniform", 1, 0.5, 0.5, 0.5)]
+    tall = {("classes", m): summary.metric_table(rows, inputs, "classes", m) for m in ("f1", "precision", "recall")}
+    cont = [{"terms_from": "problem_oriented", "input": "original", "mean_exact": 0.0, "share_runs_with_any": 0.0},
+            {"terms_from": "problem_oriented@100", "input": "problem_oriented@100", "mean_exact": 3.0,
+             "share_runs_with_any": 1.0}]
+    dose = summary.dose_table(tall, cont, inputs, "school", 2026)
+    assert [(r["input"], r["target_rate"]) for r in dose] == [("original", 0.0), ("problem_oriented", 0.2),
+                                                              ("problem_oriented@100", 1.0)]
+    top = dose[-1]
+    assert round(top["actual_rate"], 3) == round(44 / 61, 3) and top["f1_excl"] == 0.3 and top["contamination"] == 3.0
+    assert dose[1]["contamination"] is None  # 기본 20%의 오염 행이 없으면 비워 둔다

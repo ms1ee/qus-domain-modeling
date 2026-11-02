@@ -237,3 +237,24 @@ def test_school_v3_rules():
     assert meta["n_applied"] == 12 and max(meta["class_counts"].values()) <= 2
     for e in log:
         assert e["after"][:inj.role_end(e["after"])] == e["before"][:inj.role_end(e["before"])]
+
+
+def test_split_and_variant_ids():
+    assert inj.split_input("minimal@50") == ("minimal", 0.5)
+    assert inj.split_input("minimal") == ("minimal", None)
+    assert inj.variant_id("minimal", 1.0) == "minimal@100"
+    cfg = {"defect_types": ["minimal"], "injection_rate": 0.2, "dose": {"types": ["minimal"], "rates": [0.5, 1.0]}}
+    assert inj.injection_inputs(cfg) == [("minimal", "minimal", 0.2), ("minimal@50", "minimal", 0.5),
+                                         ("minimal@100", "minimal", 1.0)]
+
+
+@pytest.mark.parametrize("defect_type", ["minimal", "problem_oriented", "unambiguous"])
+def test_higher_rates_contain_lower_rate_edits(defect_type):
+    stories = STORIES * 1
+    edits = {}
+    for rate in (0.2, 0.6, 1.0):
+        current, log, meta = _run(defect_type, rate=rate, seed=5)
+        edits[rate] = {e["story"]: e["after"] for e in log if e["status"] == "applied"}
+        assert meta["actual_rate"] == meta["n_applied"] / len(stories)
+    assert all(edits[0.6].get(k) == v for k, v in edits[0.2].items())
+    assert all(edits[1.0].get(k) == v for k, v in edits[0.6].items())
