@@ -164,9 +164,9 @@
 
 | 용어 출처 | 입력 | 실행 | 실행당 완전 일치 평균 | 1개 이상 실행 비율 | 반복별 완전 일치 수 | 부분 일치 평균 | 뽑힌 이름 (완전 일치) |
 |---|---|---|---|---|---|---|---|
-| problem_oriented | problem_oriented | 10 | 1.80 | 40% | [5, 3, 0, 0, 6, 0, 0, 0, 0, 4] | 0.70 | Cache, Cron Job, Cron job, CronJob, HTML form, JSON payload, REST API, Rest API, RestAPI, SQL database table, Web socket connection, Web Socket Connection |
+| problem_oriented | problem_oriented | 10 | 1.80 | 40% | [5, 3, 0, 0, 6, 0, 0, 0, 0, 4] | 0.70 | Cache, Cron job, Cron Job, CronJob, HTML form, JSON payload, Rest API, REST API, RestAPI, SQL database table, Web socket connection, Web Socket Connection |
 | problem_oriented@50 | problem_oriented@50 | 10 | 2.60 | 60% | [2, 2, 0, 0, 5, 0, 0, 5, 6, 6] | 0.20 | Button, Cache, Cron Job, DropdownMenu, HTML Form, JSON Payload, ModalDialog, REST API, SQL Database Table, Web Socket Connection, WebSocketConnection |
-| problem_oriented@100 | problem_oriented@100 | 10 | 4.40 | 70% | [9, 4, 2, 6, 0, 4, 10, 0, 9, 0] | 0.40 | Button, Cache, Cron Job, Cron job, CronJob, Dropdown Menu, Dropdown menu, DropdownMenu, HTML Form, HTML form, JSON payload, JSON Payload, Modal Dialog, Modal dialog, ModalDialog, REST API, SQL Database Table, SQL database table, Web socket connection, Web Socket Connection, WebSocketConnection |
+| problem_oriented@100 | problem_oriented@100 | 10 | 4.40 | 70% | [9, 4, 2, 6, 0, 4, 10, 0, 9, 0] | 0.40 | Button, Cache, Cron job, Cron Job, CronJob, Dropdown Menu, Dropdown menu, DropdownMenu, HTML Form, HTML form, JSON Payload, JSON payload, Modal dialog, Modal Dialog, ModalDialog, REST API, SQL Database Table, SQL database table, Web Socket Connection, Web socket connection, WebSocketConnection |
 | problem_oriented | original | 10 | 0.00 | 0% | [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] | 0.90 | – |
 | minimal | minimal | 10 | 0.00 | 0% | [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] | 0.00 | – |
 | minimal@50 | minimal@50 | 10 | 0.00 | 0% | [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] | 0.00 | – |
@@ -187,6 +187,65 @@
 | 8 | 8 | 0 | 0 | 4 | – | – |
 | 9 | 8 | 0 | 0 | 5 | – | – |
 | 10 | 8 | 0 | 1 | 5 | – | behavior/conduct |
+
+## unambiguous@50 [50.8% (목표 50%)] 하락 요인 (원본 10회와 비교, 숫자만)
+
+TP·FP·중복은 기본 채점(동의어 → 원래 클래스 되돌림) 기준이다. FP = 정답 밖 이름, 중복(dup) = 서로 다른 이름이 같은 정답에 매핑된 것(원래 용어와 동의어를 둘 다 뽑으면 여기에 들어간다). '둘 다' = 원래 용어와 동의어가 둘 다 클래스로 뽑힌 쌍, '동의어만' = 동의어만 뽑혀 되돌림으로 정답과 일치한 쌍 (주입 쌍 17개 중).
+
+| 입력 | 반복 | 뽑힌 클래스 | TP | FP | 중복 | 둘 다 | 동의어만 |
+|---|---|---|---|---|---|---|---|
+| original | 1 | 20 | 9 | 11 | 0 | – | – |
+| original | 2 | 19 | 9 | 10 | 0 | – | – |
+| original | 3 | 28 | 13 | 15 | 0 | – | – |
+| original | 4 | 18 | 12 | 6 | 0 | – | – |
+| original | 5 | 24 | 12 | 12 | 0 | – | – |
+| original | 6 | 24 | 9 | 15 | 0 | – | – |
+| original | 7 | 27 | 12 | 15 | 0 | – | – |
+| original | 8 | 20 | 9 | 11 | 0 | – | – |
+| original | 9 | 21 | 11 | 10 | 0 | – | – |
+| original | 10 | 18 | 7 | 11 | 0 | – | – |
+| **original 평균** | 10회 | 21.9 | 10.3 | 11.6 | 0.0 | – | – |
+| unambiguous@50 | 1 | 23 | 10 | 13 | 2 | 2 | 2 |
+| unambiguous@50 | 2 | 20 | 7 | 13 | 1 | 1 | 0 |
+| unambiguous@50 | 3 | 23 | 8 | 15 | 1 | 1 | 0 |
+| unambiguous@50 | 4 | 16 | 7 | 9 | 2 | 2 | 0 |
+| unambiguous@50 | 5 | 30 | 12 | 18 | 2 | 2 | 2 |
+| unambiguous@50 | 6 | 27 | 10 | 17 | 1 | 1 | 2 |
+| unambiguous@50 | 7 | 29 | 12 | 17 | 2 | 2 | 2 |
+| unambiguous@50 | 8 | 12 | 6 | 6 | 0 | 0 | 1 |
+| unambiguous@50 | 9 | 26 | 10 | 16 | 2 | 2 | 2 |
+| unambiguous@50 | 10 | 25 | 7 | 18 | 2 | 2 | 1 |
+| **unambiguous@50 평균** | 10회 | 23.1 | 8.9 | 14.2 | 1.5 | 1.5 | 1.2 |
+
+unambiguous@50에만 나온 FP 이름 (원본 10회의 FP에는 없던 것), 빈도 = 그 이름이 나온 unambiguous@50 실행 수, 상위 15개:
+
+| 순위 | FP 이름 (정규화) | 실행 수 |
+|---|---|---|
+| 1 | child | 3 |
+| 2 | contact information | 2 |
+| 3 | dlm | 2 |
+| 4 | lms | 2 |
+| 5 | lms system | 2 |
+| 6 | multiple-choice exercise | 2 |
+| 7 | open exercise | 2 |
+| 8 | question page | 2 |
+| 9 | role | 2 |
+| 10 | data | 1 |
+| 11 | dlm page | 1 |
+| 12 | exercise (multiple-choice or open) | 1 |
+| 13 | grade record | 1 |
+| 14 | grades record | 1 |
+| 15 | lms system confirmation | 1 |
+
+## problem_oriented 오염 추세 (탐색적 분석)
+
+실행 단위 오염 수(완전 일치)와 실제 주입 비율의 켄달 타우-b와 순열검정. 원본 0% 실행 포함 n = 40. 순열 10,000회(오염 수를 실행 사이에서 섞음, 난수 seed 2026), 양측 p = (k+1)/(순열 수+1).
+
+- 켄달 타우-b = 0.457, 순열검정 p = 0.0007 (몬테카를로 추정. 같은 데이터에 다른 seed: seed 1 → 0.0004, seed 2 → 0.0005)
+- 실제 비율 0.0%: 실행별 오염 수 [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+- 실제 비율 19.7%: 실행별 오염 수 [5, 3, 0, 0, 6, 0, 0, 0, 0, 4]
+- 실제 비율 50.8%: 실행별 오염 수 [2, 2, 0, 0, 5, 0, 0, 5, 6, 6]
+- 실제 비율 72.1%: 실행별 오염 수 [9, 4, 2, 6, 0, 4, 10, 0, 9, 0]
 
 ## 원 논문과 나란히
 

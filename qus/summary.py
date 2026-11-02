@@ -175,16 +175,20 @@ def contamination_table(terms: list[dict]) -> list[dict]:
     return out
 
 
-def synonym_pair_counts(records: list[dict], set_id: str, seed: int) -> list[dict]:
-    """unambiguous 실행에서 (원래 용어, 동의어)가 둘 다 클래스로 뽑힌 쌍의 수 (동의어 되돌리기 전 이름 기준)."""
-    pairs = sorted((cls, syn) for syn, cls in load_meta(set_id, "unambiguous", seed)["synonym_map"].items())
+def synonym_pair_counts(records: list[dict], set_id: str, seed: int, input_id: str = "unambiguous") -> list[dict]:
+    """unambiguous 계열 실행에서 (원래 용어, 동의어)가 둘 다 클래스로 뽑힌 쌍의 수 (동의어 되돌리기 전 이름 기준).
+
+    synonym_only = 동의어만 뽑히고 원래 용어는 안 뽑힌 쌍. 기본 채점에서는 되돌림으로 정답과 일치한다.
+    """
+    pairs = sorted((cls, syn) for syn, cls in load_meta(set_id, input_id, seed)["synonym_map"].items())
     out = []
-    for r in sorted((r for r in records if r["input"] == "unambiguous"), key=lambda r: r["rep"]):
+    for r in sorted((r for r in records if r["input"] == input_id), key=lambda r: r["rep"]):
         keys = {_key(p) for p in r["classes"] or []}
         both = [f"{c}/{s}" for c, s in pairs if _key(c) in keys and _key(s) in keys]
         syn_only = [f"{c}/{s}" for c, s in pairs if _key(s) in keys and _key(c) not in keys]
         orig_only = [f"{c}/{s}" for c, s in pairs if _key(c) in keys and _key(s) not in keys]
-        out.append({"rep": r["rep"], "parsed": r["classes"] is not None, "pairs": len(pairs), "both": len(both),
+        out.append({"input": input_id, "rep": r["rep"], "parsed": r["classes"] is not None, "pairs": len(pairs),
+                    "both": len(both),
                     "synonym_only": len(syn_only), "original_only": len(orig_only), "both_names": both,
                     "synonym_only_names": syn_only})
     return out
@@ -223,6 +227,82 @@ def _md_prf_single(table: list[dict], labels: dict | None = None) -> list[str]:
                      f"{_pair(r['mean_incl0'], r['mean_excl'])} | {_pair(r['delta_incl0'], r['delta_excl'], True)} | "
                      f"{_pair(r['delta_over_sd_incl0'], r['delta_over_sd_excl'], True)} | {r['truncated']} |")
     return lines
+
+
+def fp_breakdown(records: list[dict], gold: dict, fixes: dict, inputs: list[str]) -> list[dict]:
+    """실행별 기본 채점의 TP·FP·중복(dup)과 정답 밖 이름(FP) 목록 (정규화한 이름)."""
+    out = []
+    for r in sorted((r for r in records if r["input"] in inputs), key=lambda r: (inputs.index(r["input"]), r["rep"])):
+        c = score_record(r, gold, fixes)[0]
+        if c["status"] != "ok":
+            continue
+        out.append({"input": r["input"], "rep": r["rep"], "n_classes": len(r["classes"]), "tp": c["tp"], "fp": c["fp"],
+                    "dup": c["dup"], "fp_names": sorted({normalize_term(n) for n in c["false_positives"]})})
+    return out
+
+
+def fp_only_in(breakdown: list[dict], target: str, baseline: str, top: int = 15) -> list[tuple[str, int]]:
+    """target 입력에만 나오고 baseline 입력의 어느 실행에도 없던 FP 이름과, 그 이름이 나온 target 실행 수 (상위 top개)."""
+    base = {n for b in breakdown if b["input"] == baseline for n in b["fp_names"]}
+    freq = defaultdict(int)
+    for b in breakdown:
+        if b["input"] == target:
+            for n in b["fp_names"]:
+                if n not in base:
+                    freq[n] += 1
+    return sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))[:top]
+
+
+def kendall_tau_b(x: list[float], y: list[float]) -> float | None:
+    """동순위를 보정한 켄달 타우-b. 분모가 0이면 None."""
+    n0 = n1 = n2 = nc = nd = 0
+    for i in range(len(x)):
+        for j in range(i + 1, len(x)):
+            n0 += 1
+            dx, dy = (x[i] > x[j]) - (x[i] < x[j]), (y[i] > y[j]) - (y[i] < y[j])
+            n1 += dx == 0
+            n2 += dy == 0
+            if dx and dy:
+                nc += dx == dy
+                nd += dx != dy
+    denom = ((n0 - n1) * (n0 - n2)) ** 0.5
+    return (nc - nd) / denom if denom else None
+
+
+def permutation_test_tau(x: list[float], y: list[float], n_perm: int = 10_000, seed: int = 2026) -> dict:
+    """y를 무작위로 섞어 |tau_b| 가 관측값 이상인 비율 (양측). p = (k + 1) / (n_perm + 1)."""
+    import random
+
+    obs = kendall_tau_b(x, y)
+    rng, yy, k = random.Random(seed), list(y), 0
+    for _ in range(n_perm):
+        rng.shuffle(yy)
+        t = kendall_tau_b(x, yy)
+        k += t is not None and obs is not None and abs(t) >= abs(obs) - 1e-12
+    return {"tau_b": obs, "p": (k + 1) / (n_perm + 1), "n_perm": n_perm, "seed": seed, "n": len(x)}
+
+
+def contamination_trend(terms: list[dict], set_id: str, seed: int, base: str = "problem_oriented") -> dict | None:
+    """실행 단위 오염 수(완전 일치)와 실제 주입 비율의 켄달 타우-b와 순열검정 (탐색적 분석). 원본(0%) 실행을 포함한다."""
+    xs, ys, per = [], [], defaultdict(list)
+    for t in terms:
+        if not t["parsed"]:
+            continue
+        if t["input"] == "original" and t["terms_from"] == base:
+            rate = 0.0
+        elif split_input(t["input"])[0] == base and t["terms_from"] == t["input"]:
+            meta = load_meta(set_id, t["input"], seed)
+            rate = meta["n_applied"] / meta["n_stories"]
+        else:
+            continue
+        xs.append(rate)
+        ys.append(t["exact"])
+        per[rate].append(t["exact"])
+    if len(set(xs)) < 2:
+        return None
+    other = {sd: permutation_test_tau(xs, ys, seed=sd)["p"] for sd in (1, 2)}  # 몬테카를로 변동 확인용
+    return {**permutation_test_tau(xs, ys), "type": base, "p_other_seeds": other,
+            "by_rate": {f"{r:.1%}": v for r, v in sorted(per.items())}}
 
 
 def _md_cache(cache: dict, inputs: list[str], labels: dict | None = None) -> list[str]:
@@ -377,6 +457,10 @@ def summarize() -> None:
     contamination = contamination_table(terms)
     dose = dose_table(tall, contamination, cfg["inputs"], set_id, cfg["seed"], relation_output_stats(records))
     pairs = synonym_pair_counts(records, set_id, cfg["seed"])
+    unamb_variants = [i for i in cfg["inputs"] if split_input(i)[0] == "unambiguous" and "@" in i]
+    variant_pairs = {i: synonym_pair_counts(records, set_id, cfg["seed"], i) for i in unamb_variants}
+    breakdown = fp_breakdown(records, gold, fixes, ["original", *unamb_variants])
+    trend = contamination_trend(terms, set_id, cfg["seed"])
     failures = failure_summary(base_rows)
     cache = cache_counts(records)
 
@@ -391,7 +475,8 @@ def summarize() -> None:
         for k in keys:
             w.writerows(t3[k] + tall[k])
     for name, data in (("injected_terms", terms), ("synonym_pairs", pairs), ("dose", dose),
-                       ("contamination", contamination)):
+                       ("contamination", contamination), ("unambiguous_fp", {"breakdown": breakdown, "pairs": variant_pairs}),
+                       ("contamination_trend", trend)):
         with open(f"{stem}_{name}.json", "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -439,6 +524,38 @@ def summarize() -> None:
     for p in pairs:
         md.append(f"| {p['rep']} | {p['pairs']} | {p['both'] if p['parsed'] else '파싱 실패'} | {p['synonym_only']} | "
                   f"{p['original_only']} | {', '.join(p['both_names']) or '–'} | {', '.join(p['synonym_only_names']) or '–'} |")
+    for vid in unamb_variants:
+        md += ["", f"## {labels.get(vid, vid)} 하락 요인 (원본 10회와 비교, 숫자만)", "",
+               "TP·FP·중복은 기본 채점(동의어 → 원래 클래스 되돌림) 기준이다. FP = 정답 밖 이름, 중복(dup) = 서로 다른 이름이"
+               " 같은 정답에 매핑된 것(원래 용어와 동의어를 둘 다 뽑으면 여기에 들어간다). '둘 다' = 원래 용어와 동의어가 둘 다"
+               " 클래스로 뽑힌 쌍, '동의어만' = 동의어만 뽑혀 되돌림으로 정답과 일치한 쌍 (주입 쌍 "
+               f"{variant_pairs[vid][0]['pairs'] if variant_pairs[vid] else '–'}개 중).", "",
+               "| 입력 | 반복 | 뽑힌 클래스 | TP | FP | 중복 | 둘 다 | 동의어만 |", "|---|---|---|---|---|---|---|---|"]
+        vp = {p["rep"]: p for p in variant_pairs[vid]}
+        for input_id in ("original", vid):
+            rows_i = [b for b in breakdown if b["input"] == input_id]
+            for b in rows_i:
+                p = vp.get(b["rep"]) if input_id == vid else None
+                md.append(f"| {input_id} | {b['rep']} | {b['n_classes']} | {b['tp']} | {b['fp']} | {b['dup']} | "
+                          f"{p['both'] if p else '–'} | {p['synonym_only'] if p else '–'} |")
+            if rows_i:
+                ps = [vp[b["rep"]] for b in rows_i if b["rep"] in vp] if input_id == vid else []
+                md.append(f"| **{input_id} 평균** | {len(rows_i)}회 | {_mean([b['n_classes'] for b in rows_i]):.1f} | "
+                          f"{_mean([b['tp'] for b in rows_i]):.1f} | {_mean([b['fp'] for b in rows_i]):.1f} | "
+                          f"{_mean([b['dup'] for b in rows_i]):.1f} | "
+                          + (f"{_mean([p['both'] for p in ps]):.1f} | {_mean([p['synonym_only'] for p in ps]):.1f} |" if ps else "– | – |"))
+        only = fp_only_in(breakdown, vid, "original")
+        md += ["", f"{vid}에만 나온 FP 이름 (원본 10회의 FP에는 없던 것), 빈도 = 그 이름이 나온 {vid} 실행 수, 상위 15개:", "",
+               "| 순위 | FP 이름 (정규화) | 실행 수 |", "|---|---|---|",
+               *[f"| {k} | {n} | {c} |" for k, (n, c) in enumerate(only, 1)]]
+    if trend:
+        md += ["", "## problem_oriented 오염 추세 (탐색적 분석)", "",
+               f"실행 단위 오염 수(완전 일치)와 실제 주입 비율의 켄달 타우-b와 순열검정. 원본 0% 실행 포함 n = {trend['n']}."
+               f" 순열 {trend['n_perm']:,}회(오염 수를 실행 사이에서 섞음, 난수 seed {trend['seed']}), 양측 p = (k+1)/(순열 수+1).", "",
+               f"- 켄달 타우-b = {trend['tau_b']:.3f}, 순열검정 p = {trend['p']:.4f}"
+               f" (몬테카를로 추정. 같은 데이터에 다른 seed: "
+               + ", ".join(f"seed {k} → {v:.4f}" for k, v in trend["p_other_seeds"].items()) + ")",
+               *[f"- 실제 비율 {r}: 실행별 오염 수 {v}" for r, v in trend["by_rate"].items()]]
     if paper:
         md += ["", "## 원 논문과 나란히", "",
                "| | 클래스 F1 |", "|---|---|",

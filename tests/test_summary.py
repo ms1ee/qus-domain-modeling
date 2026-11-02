@@ -147,3 +147,29 @@ def test_relation_output_stats():
     assert (st["malformed_mean"], st["malformed_max"], st["assoc_mean"], st["assoc_max"]) == (29.5, 59, 6, 9)
     assert summary._md_relations(st) == "1/4 (호출 안 함 1) | 29.5 / 59 | 6.0 / 9"
     assert summary._md_relations(None) == "– | – | –"
+
+
+def test_kendall_tau_b_known_values():
+    assert summary.kendall_tau_b([1, 2, 3, 4], [1, 2, 3, 4]) == pytest.approx(1.0)
+    assert summary.kendall_tau_b([1, 2, 3, 4], [4, 3, 2, 1]) == pytest.approx(-1.0)
+    assert summary.kendall_tau_b([1, 2, 3], [1, 3, 2]) == pytest.approx(1 / 3)
+    # 동순위: x=[0,0,1,1], y=[0,1,1,2] → 일치 쌍 (0,2)(0,3)(1,3) = 3, 불일치 0, n0=6, x 동순위 2, y 동순위 1
+    #   → 3 / sqrt((6-2)(6-1)) = 3 / sqrt(20)
+    assert summary.kendall_tau_b([0, 0, 1, 1], [0, 1, 1, 2]) == pytest.approx(3 / (20 ** 0.5))
+    assert summary.kendall_tau_b([1, 1], [1, 2]) is None
+
+
+def test_permutation_test_is_reproducible_and_bounded():
+    x, y = [0] * 5 + [1] * 5, [0, 0, 0, 1, 0, 2, 3, 1, 4, 2]
+    a = summary.permutation_test_tau(x, y, n_perm=500, seed=1)
+    assert a == summary.permutation_test_tau(x, y, n_perm=500, seed=1)
+    assert 0 < a["p"] <= 1 and a["tau_b"] > 0
+    flat = summary.permutation_test_tau(x, [1] * 10, n_perm=50)
+    assert flat["tau_b"] is None and flat["p"] == pytest.approx(1 / 51)
+
+
+def test_fp_only_in_counts_runs():
+    bd = [{"input": "original", "fp_names": ["account", "school"]},
+          {"input": "u@50", "fp_names": ["account", "coursework", "pupil"]},
+          {"input": "u@50", "fp_names": ["coursework"]}]
+    assert summary.fp_only_in(bd, "u@50", "original") == [("coursework", 2), ("pupil", 1)]
