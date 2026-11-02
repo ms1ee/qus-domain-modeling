@@ -90,3 +90,12 @@ def test_unmapped_rows_score_synonyms_as_false_positives(smoke):
     strict = summary.unmapped_rows([rec], gold, fixes)[0]
     assert strict["input"] == summary.UNMAPPED
     assert (mapped["tp"], mapped["fp"]) == (2, 0) and (strict["tp"], strict["fp"]) == (1, 1)
+
+
+def test_cache_counts_use_recorded_server_info():
+    recs = [{"input": "original", "calls": {"classes": {"response": {"server_info": {"cache": "전체 재사용"}}},
+                                            "associations": {"response": {"server_info": {"cache": "부분 재사용"}}}}}]
+    c = summary.cache_counts(recs)
+    assert c[("original", "classes")]["전체 재사용"] == 1 and c[("original", "associations")]["부분 재사용"] == 1
+    line = summary._md_cache(c, ["original"])[0]
+    assert line.endswith("| 2/2 (100%) |")

@@ -263,3 +263,42 @@ def test_preflight_records_warning_without_stopping(fake):
     assert snap["pressure_level"] == 2 and "기록만" in snap["warning"] and round(snap["swap_increase_gib"], 2) == 0.2
     fake([{"identifier": LM["identifier"]}], mem={**_mem(), "compressor_gib": 4.0})
     assert "warning" not in lm.preflight(LM["identifier"], GUARD4, 1.0)()
+
+
+LOG = """[t] Received request: POST to /v1/chat/completions with body {
+[t][DEBUG] 0.1 I slot launch_slot_: id  0 | task 1332 | processing task, is_child = 0
+[t][DEBUG] 0.2 W slot   operator(): id  0 | task 1332 | need to evaluate at least 1 token
+[t][DEBUG] 0.3 I slot print_timing: id  0 | task 1332 | prompt eval time =      27.29 ms /     1 tokens (x)
+[t][INFO][m] Generated prediction: {
+  "id": "chatcmpl-A",
+  "choices": [{"message": {"content": "long text"}}],
+  "usage": {
+    "prompt_tokens": 2553,
+[t] Received request: POST to /v1/chat/completions with body {
+[t][DEBUG] 0.4 I slot launch_slot_: id  0 | task 1782 | processing task, is_child = 0
+[t][DEBUG] 0.5 I slot print_timing: id  0 | task 1782 | prompt eval time =     107.77 ms /    60 tokens (x)
+[t][INFO][m] Generated prediction: {
+  "id": "chatcmpl-B",
+  "usage": {
+    "prompt_tokens": 2521,
+"""
+
+
+def test_server_call_info_reads_prompt_eval_from_log(tmp_path, monkeypatch):
+    d = tmp_path / "2026-11"
+    d.mkdir()
+    (d / "2026-11-02.1.log").write_text(LOG)
+    monkeypatch.setattr(lm, "SERVER_LOGS", tmp_path)
+    a = lm.server_call_info("chatcmpl-A", wait_s=0)
+    assert (a["cache"], a["prompt_tokens"], a["prompt_eval_tokens"], a["task"]) == ("전체 재사용", 2553, 1, 1332)
+    b = lm.server_call_info("chatcmpl-B", wait_s=0)
+    assert (b["cache"], b["cached_tokens"]) == ("부분 재사용", 2461)
+    assert lm.server_call_info("chatcmpl-X", wait_s=0)["cache"] == "미확인"
+    assert lm.server_call_info(None)["cache"] == "미확인"
+
+
+def test_cache_label_thresholds():
+    assert lm.cache_label(2553, 2553) == "새로 계산"
+    assert lm.cache_label(2523, 2508) == "새로 계산"  # 템플릿 앞부분 15토큰만 재사용
+    assert lm.cache_label(2521, 60) == "부분 재사용"
+    assert lm.cache_label(2553, 1) == "전체 재사용"

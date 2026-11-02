@@ -176,6 +176,60 @@ def preflight(identifier: str, guard: dict, swap_baseline_gib: float):
     return check
 
 
+SERVER_LOGS = Path.home() / ".lmstudio" / "server-logs"  # 읽기만 한다
+CACHE_PARTIAL_MIN_TOKENS = 100  # DRAFT: 재사용 토큰이 이보다 많으면 "부분 재사용" (템플릿 공통 앞부분 약 15토큰은 제외되게)
+
+
+def cache_label(prompt_tokens: int, eval_tokens: int) -> str:
+    """전체 재사용: 1토큰 이하만 새로 계산 / 부분 재사용: 100토큰 넘게 재사용 / 새로 계산: 그 밖."""
+    if eval_tokens <= 1:
+        return "전체 재사용"
+    return "부분 재사용" if prompt_tokens - eval_tokens > CACHE_PARTIAL_MIN_TOKENS else "새로 계산"
+
+
+def _parse_call(text: str, response_id: str) -> dict | None:
+    at = text.find(f'"id": "{response_id}"')
+    if at < 0:
+        return None
+    req = text.rfind("Received request: POST to /v1/chat/completions", 0, at)
+    block = text[req:at]
+    task = re.findall(r"launch_slot_: id\s+(\d+) \| task (\d+)", block)
+    if not task:
+        return None
+    slot, t = task[-1]
+    ev = re.search(rf"task {t} \| prompt eval time =\s*([\d.]+) ms /\s*(\d+) tokens", block)
+    nxt = text.find("Received request: POST", at)
+    pt = re.search(r'"prompt_tokens": (\d+)', text[at:nxt if nxt > 0 else len(text)])  # 응답 본문 뒤의 usage
+    if not (ev and pt):
+        return None
+    prompt_tokens, eval_tokens = int(pt.group(1)), int(ev.group(2))
+    return {"slot": int(slot), "task": int(t), "prompt_tokens": prompt_tokens, "prompt_eval_tokens": eval_tokens,
+            "cached_tokens": prompt_tokens - eval_tokens, "prompt_eval_ms": float(ev.group(1)),
+            "cache": cache_label(prompt_tokens, eval_tokens)}
+
+
+def server_call_info(response_id: str | None, wait_s: float = 3.0, files: int = 2) -> dict:
+    """LM Studio 서버 로그에서 이 응답의 프롬프트 처리 정보(캐시 재사용 여부)를 찾는다. 실패해도 예외를 내지 않는다."""
+    import time
+    if not response_id:
+        return {"cache": "미확인", "reason": "응답 id 없음"}
+    deadline = time.monotonic() + wait_s
+    while True:
+        logs = sorted(SERVER_LOGS.glob("*/*.log"), key=lambda f: f.stat().st_mtime, reverse=True)[:files]
+        for f in logs:
+            try:
+                with open(f, "rb") as fh:
+                    fh.seek(max(0, f.stat().st_size - 16 * 1024 * 1024))
+                    info = _parse_call(fh.read().decode("utf-8", "replace"), response_id)
+            except OSError:
+                info = None
+            if info:
+                return {**info, "log_file": str(f)}
+        if time.monotonic() >= deadline:
+            return {"cache": "미확인", "reason": "서버 로그에서 응답 id를 찾지 못함"}
+        time.sleep(0.3)
+
+
 def model_file_fingerprint(lm_cfg: dict) -> dict:
     """GGUF 파일의 SHA-256과 크기 (읽기만 한다). 크기가 설정과 다르면 파일이 바뀐 것이다.
 

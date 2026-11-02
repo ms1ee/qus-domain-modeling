@@ -174,7 +174,7 @@ def _run_model(model_name: str, model_cfg: dict, jobs: list[tuple], infos: dict)
     with lmstudio.smoke_model(lm_cfg, guard, on_close=lambda s: _append_jsonl("sessions.jsonl", s)) as session:
         check = lmstudio.preflight(session["identifier"], guard, session["swap_baseline_gib"])
         _run_jobs(lambda rep: make_client({**rep_model_config(model_cfg, rep), "model": session["identifier"]},
-                                          preflight=check),
+                                          preflight=check, postflight=lmstudio.server_call_info),
                   model_name, model_cfg, jobs, infos, session)
 
 
@@ -211,11 +211,12 @@ def _run_jobs(client_for, model_name, model_cfg, jobs, infos, session) -> None:
         calls = record["calls"]
         cut = [t for t, c in calls.items() if c.get("truncated")]
         warned = [t for t, c in calls.items() if (c["response"].get("preflight") or {}).get("warning")]
+        cache = "/".join((c["response"].get("server_info") or {}).get("cache", "-") for c in calls.values())
         print(f"  {model_name} {set_id} {input_id} rep{rep}: "
               f"classes={len(record['classes'] or [])} associations={len(record['associations'] or [])}"
               + "".join(f" {t}:{c['response']['output_tokens']}tok/{c['response']['elapsed_s'] or 0:.0f}s"
                         for t, c in calls.items())
-              + (f" 절단={cut}" if cut else "") + (f" 압박경고={warned}" if warned else "")
+              + f" 캐시={cache}" + (f" 절단={cut}" if cut else "") + (f" 압박경고={warned}" if warned else "")
               + (f" error={record['error']}" if record["error"] else ""))
 
 

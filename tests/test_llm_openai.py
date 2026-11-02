@@ -101,3 +101,12 @@ def test_make_client_needs_no_api_key_for_local_server(monkeypatch):
 def test_preflight_result_is_kept_in_response(monkeypatch):
     client, _ = _client(monkeypatch, OK, preflight=lambda: {"pressure_level": 2, "warning": "w"})
     assert client.complete("p").preflight == {"pressure_level": 2, "warning": "w"}
+
+
+def test_postflight_gets_response_id(monkeypatch):
+    fake = FakeHTTP({**OK, "id": "chatcmpl-1"})
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake)
+    seen = []
+    client = OpenAICompatibleClient("m", "http://x/v1", postflight=lambda rid: seen.append(rid) or {"cache": "새로 계산"},
+                                    **PARAMS)
+    assert client.complete("p").server_info == {"cache": "새로 계산"} and seen == ["chatcmpl-1"]

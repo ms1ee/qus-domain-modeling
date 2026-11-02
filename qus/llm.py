@@ -37,6 +37,7 @@ class LLMResponse:
     retries: int = 0
     retry_errors: list[str] = field(default_factory=list)
     preflight: dict | None = None  # 호출 직전 확인 결과 (로컬 서버: 메모리 측정값, 압박 경고)
+    server_info: dict | None = None  # 호출 직후 서버 쪽 정보 (로컬 서버: 프롬프트 캐시 재사용 여부)
 
     @property
     def truncated(self) -> bool:
@@ -90,7 +91,7 @@ class OpenAICompatibleClient:
     MAX_RETRIES = 1
 
     def __init__(self, model: str, base_url: str, temperature=None, top_p=None, seed=None, max_tokens=None,
-                 timeout_s: float = 600, preflight=None):
+                 timeout_s: float = 600, preflight=None, postflight=None):
         params = {"temperature": temperature, "top_p": top_p, "seed": seed, "max_tokens": max_tokens}
         missing = [k for k, v in params.items() if v is None]
         if missing:
@@ -100,6 +101,7 @@ class OpenAICompatibleClient:
         self.params = params
         self.timeout_s = timeout_s
         self.preflight = preflight
+        self.postflight = postflight  # postflight(response_id) -> dict. 실패해도 예외를 내지 않아야 한다
 
     def _post(self, payload: dict) -> dict:
         req = urllib.request.Request(self.url, data=json.dumps(payload).encode("utf-8"),
@@ -144,6 +146,7 @@ class OpenAICompatibleClient:
             retries=len(errors),
             retry_errors=errors,
             preflight=checked,
+            server_info=self.postflight(data.get("id")) if self.postflight else None,
         )
 
 
@@ -186,7 +189,7 @@ def role_models(role: str) -> dict[str, dict]:
     return {name: cfg["models"][name] for name in _as_list(cfg["roles"].get(role)) if name != RULE_BASED}
 
 
-def make_client(model_cfg: dict, preflight=None):
+def make_client(model_cfg: dict, preflight=None, postflight=None):
     provider = model_cfg["provider"]
     if provider not in _PROVIDERS:
         raise ValueError(f"지원하지 않는 provider: {provider}")
@@ -197,6 +200,7 @@ def make_client(model_cfg: dict, preflight=None):
     params = {k: v for k, v in model_cfg.items() if k not in _NON_CLIENT_KEYS}
     if provider == "openai_compatible":
         params["preflight"] = preflight
+        params["postflight"] = postflight
     return _PROVIDERS[provider](**params)
 
 
