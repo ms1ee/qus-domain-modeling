@@ -14,6 +14,7 @@
 """
 import csv
 import json
+import re
 import statistics
 from collections import defaultdict
 
@@ -238,8 +239,33 @@ def _md_cache(cache: dict, inputs: list[str], labels: dict | None = None) -> lis
     return lines
 
 
-def dose_table(tall: dict, contamination: list[dict], inputs: list[str], set_id: str, seed: int) -> list[dict]:
-    """유형 × 주입 비율(0/기본/변형)별 평균 클래스 F1·정밀도·재현율·오염 수."""
+_MALFORMED = re.compile(r"형식이 잘못된 항목 (\d+)개 제외")
+
+
+def relation_output_stats(records: list[dict]) -> dict[str, dict]:
+    """입력별 관계 출력 이상: 파싱 실패 수, 형식 오류로 제외된 관계 항목 수(평균·최대), 실행당 관계 수(평균·최대).
+
+    형식 오류·관계 수는 관계 JSON을 읽은 실행만으로 센다 (파싱 실패한 실행에는 항목이 없다).
+    """
+    groups = defaultdict(list)
+    for r in records:
+        groups[r["input"]].append(r)
+    out = {}
+    for input_id, g in groups.items():
+        parsed = [r for r in g if r["associations"] is not None]
+        malformed = [int(m.group(1)) if (m := _MALFORMED.search(r["error"] or "")) else 0 for r in parsed]
+        counts = [len(r["associations"]) for r in parsed]
+        out[input_id] = {"runs": len(g), "n_parsed": len(parsed),
+                         "parse_failed": sum(r["associations"] is None and "associations" in r["calls"] for r in g),
+                         "not_called": sum(r["associations"] is None and "associations" not in r["calls"] for r in g),
+                         "malformed_mean": _mean(malformed), "malformed_max": max(malformed, default=None),
+                         "assoc_mean": _mean(counts), "assoc_max": max(counts, default=None)}
+    return out
+
+
+def dose_table(tall: dict, contamination: list[dict], inputs: list[str], set_id: str, seed: int,
+               rel_stats: dict | None = None) -> list[dict]:
+    """유형 × 주입 비율(0/기본/변형)별 평균 클래스 F1·정밀도·재현율·오염 수·관계 출력 이상."""
     by_input = {m: {r["input"]: r for r in tall[("classes", m)]} for m in ("f1", "precision", "recall")}
     cont = {(c["terms_from"], c["input"]): c for c in contamination}
     out = []
@@ -258,6 +284,7 @@ def dose_table(tall: dict, contamination: list[dict], inputs: list[str], set_id:
                    "runs": by_input["f1"][input_id]["runs"]}
             for m in ("f1", "precision", "recall"):
                 row[f"{m}_incl0"], row[f"{m}_excl"] = by_input[m][input_id]["mean_incl0"], by_input[m][input_id]["mean_excl"]
+            row["relations"] = (rel_stats or {}).get(input_id)
             row["contamination"] = c["mean_exact"] if c and base in CONTAMINATION_TYPES else None
             row["share_with_any"] = c["share_runs_with_any"] if c and base in CONTAMINATION_TYPES else None
             out.append(row)
@@ -265,15 +292,25 @@ def dose_table(tall: dict, contamination: list[dict], inputs: list[str], set_id:
 
 
 def _md_dose(rows: list[dict]) -> list[str]:
-    lines = ["| 유형 | 주입 비율: 실제 (목표) | n | 클래스 F1 | 정밀도 | 재현율 | 오염 (실행당 완전 일치) | 오염 ≥1 실행 비율 |",
-             "|---|---|---|---|---|---|---|---|"]
+    lines = ["| 유형 | 주입 비율: 실제 (목표) | n | 클래스 F1 | 정밀도 | 재현율 | 오염 (실행당 완전 일치) | 오염 ≥1 실행 비율 "
+             "| 관계 파싱 실패 | 형식 오류 제외 항목 평균 / 최대 | 실행당 관계 수 평균 / 최대 |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         cont = "–" if r["contamination"] is None else f"{r['contamination']:.2f}"
         share = "–" if r["share_with_any"] is None else f"{r['share_with_any']:.0%}"
         lines.append(f"| {r['type']} | {r['actual_rate']:.1%} (목표 {r['target_rate']:.0%}) | {r['runs']} | "
                      f"{_pair(r['f1_incl0'], r['f1_excl'])} | {_pair(r['precision_incl0'], r['precision_excl'])} | "
-                     f"{_pair(r['recall_incl0'], r['recall_excl'])} | {cont} | {share} |")
+                     f"{_pair(r['recall_incl0'], r['recall_excl'])} | {cont} | {share} | " + _md_relations(r["relations"]) + " |")
     return lines
+
+
+def _md_relations(rel: dict | None) -> str:
+    if not rel:
+        return "– | – | –"
+    fail = f"{rel['parse_failed']}/{rel['runs']}" + (f" (호출 안 함 {rel['not_called']})" if rel["not_called"] else "")
+    mal = "–" if rel["malformed_mean"] is None else f"{rel['malformed_mean']:.1f} / {rel['malformed_max']}"
+    cnt = "–" if rel["assoc_mean"] is None else f"{rel['assoc_mean']:.1f} / {rel['assoc_max']}"
+    return f"{fail} | {mal} | {cnt}"
 
 
 def _md_contamination(rows: list[dict]) -> list[str]:
@@ -338,7 +375,7 @@ def summarize() -> None:
     t3 = {k: metric_table(rows, inputs, *k, max_rep=3) for k in keys}
     terms = injected_term_counts(records, set_id, cfg["seed"], cfg["inputs"])
     contamination = contamination_table(terms)
-    dose = dose_table(tall, contamination, cfg["inputs"], set_id, cfg["seed"])
+    dose = dose_table(tall, contamination, cfg["inputs"], set_id, cfg["seed"], relation_output_stats(records))
     pairs = synonym_pair_counts(records, set_id, cfg["seed"])
     failures = failure_summary(base_rows)
     cache = cache_counts(records)
@@ -389,7 +426,9 @@ def summarize() -> None:
         md += ["", "## 용량-반응: 주입 비율별 평균 (0% = 원본)", "",
                "실제 비율 = 고친 스토리 수 / 61. 목표와 다르면 규칙상 적용 가능한 스토리가 모자란 것이다 (아래 주입 현황).",
                "오염 = 주입한 비도메인 용어(구현·메타 용어)가 클래스로 뽑힌 수, 완전 일치 기준. 0% 행은 그 유형이 모든 비율에서"
-               " 쓴 용어로 원본 실행을 센 기준선이다. unambiguous의 주입 단어(동의어)는 도메인 용어라 오염에 넣지 않았다.", "",
+               " 쓴 용어로 원본 실행을 센 기준선이다. unambiguous의 주입 단어(동의어)는 도메인 용어라 오염에 넣지 않았다.",
+               "관계 출력 이상: 파싱 실패 = 관계 응답에서 최종 JSON을 못 읽은 실행 수. 형식 오류 제외 항목과 실행당 관계 수는"
+               " 관계 JSON을 읽은 실행만으로 센 값이다.", "",
                *_md_dose(dose)]
     md += ["", "## 비도메인 용어 오염 (problem_oriented·minimal 계열)", "",
            "완전 일치 = 정규화한 이름이 주입 용어와 같음, 부분 일치 = 주입 용어의 단어가 하나라도 겹침 (DRAFT 규칙). "

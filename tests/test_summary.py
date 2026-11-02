@@ -133,3 +133,17 @@ def test_rate_labels_show_actual_then_target(smoke):
     assert labels["problem_oriented"] == "problem_oriented [19.7% (목표 20%)]"
     assert labels["problem_oriented@100"] == "problem_oriented@100 [72.1% (목표 100%)]"
     assert labels[summary.UNMAPPED].endswith("[19.7% (목표 20%)]")
+
+
+def test_relation_output_stats():
+    recs = [{"input": "minimal@50", "associations": [["a", "b"]] * 9, "error": "associations: 형식이 잘못된 항목 59개 제외",
+             "calls": {"classes": {}, "associations": {}}},
+            {"input": "minimal@50", "associations": [["a", "b"]] * 3, "error": None, "calls": {"classes": {}, "associations": {}}},
+            {"input": "minimal@50", "associations": None, "error": "associations: 최종 JSON을 찾지 못함",
+             "calls": {"classes": {}, "associations": {}}},
+            {"input": "minimal@50", "associations": None, "error": "classes: x", "calls": {"classes": {}}}]
+    st = summary.relation_output_stats(recs)["minimal@50"]
+    assert (st["runs"], st["n_parsed"], st["parse_failed"], st["not_called"]) == (4, 2, 1, 1)
+    assert (st["malformed_mean"], st["malformed_max"], st["assoc_mean"], st["assoc_max"]) == (29.5, 59, 6, 9)
+    assert summary._md_relations(st) == "1/4 (호출 안 함 1) | 29.5 / 59 | 6.0 / 9"
+    assert summary._md_relations(None) == "– | – | –"
