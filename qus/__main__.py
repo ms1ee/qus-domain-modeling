@@ -15,6 +15,7 @@ def main() -> None:
     run.add_argument("--inputs", nargs="+", default=None, help="기본: 설정의 inputs (없으면 original)")
     run.add_argument("--dry-run", action="store_true", help="호출 없이 남은 실행만 출력")
     sub.add_parser("score", help="runs/<run_name>의 기록을 채점해서 results/<scores_file> 생성")
+    sub.add_parser("summarize", help="스모크 결과 요약 (평균 F1, Δ, SD, 실패 포함/제외, 주입 단어 추출 수)")
     args = parser.parse_args()
 
     from .config import use_config
@@ -44,6 +45,10 @@ def main() -> None:
         from .run import score_all
 
         score_all()
+    elif args.command == "summarize":
+        from .summary import summarize
+
+        summarize()
 
 
 if __name__ == "__main__":
