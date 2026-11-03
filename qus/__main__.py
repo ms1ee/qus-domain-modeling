@@ -18,6 +18,9 @@ def main() -> None:
     sub.add_parser("summarize", help="스모크 결과 요약 (평균 F1, Δ, SD, 실패 포함/제외, 주입 단어 추출 수)")
     sub.add_parser("refine-kg", help="KG 정제 예비 실험 (DRAFT): 출처 그래프 → graphs/, 정제 전후 비교 → results/kg_refine_<세트>")
     sub.add_parser("refine-audit", help="kg-r2-v1 고정 후 정답 이름 위험 감사 (9개 세트, R2·R1) → results/kg_refine_gold_audit")
+    val = sub.add_parser("r3llm-validate", help="R3-LLM 판단기 검증 (DRAFT, qwen/qwen3-8b, environment.md 1-1)")
+    val.add_argument("--dry-run", action="store_true", help="호출 없이 검증 세트·103건 적용 계획·메모리 검사만 출력")
+    val.add_argument("--conditions", nargs="+", default=None, help="기본: 설정의 조건 전부 (a b)")
     args = parser.parse_args()
 
     from .config import use_config
@@ -59,6 +62,13 @@ def main() -> None:
         from .refine_audit import audit
 
         audit()
+    elif args.command == "r3llm-validate":
+        from .r3llm_validation import dry_run, validate
+
+        if args.dry_run:
+            print(dry_run())
+        else:
+            validate(args.conditions)
 
 
 if __name__ == "__main__":
