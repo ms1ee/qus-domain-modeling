@@ -160,7 +160,8 @@ def memory_report(cfg: dict, guard: dict) -> list[str]:
     lm = cfg["model"]["lmstudio"]
     mem, loaded = lmstudio.memory_snapshot(), lmstudio.loaded_models()
     probs = lmstudio.problems_before_load(mem, lm, guard)
-    excl = lmstudio.exclusive_problems(cfg["model"]["exclusive"], loaded)
+    excl = lmstudio.exclusive_problems({**cfg["model"]["exclusive"], "ledger_path": ROOT / cfg["model"]["exclusive"]["ledger"]},
+                                       loaded)
     size = (lmstudio.LMS_MODELS / lm["model_file"]).stat().st_size
     return [f"- 시각 {mem['taken_at']}",
             f"- `lms ps`: {lmstudio._identifiers(loaded) or '비어 있음'}",
@@ -201,12 +202,44 @@ def dry_run() -> str:
     return "\n".join(L)
 
 
-def apply_plan_report(cfg: dict, exp: dict) -> list[str]:
-    """103건 적용 계획: 캐시 없이 / 입력별 캐시 (같은 판단 입력은 한 번만). 호출 없음."""
+def top_processes(n: int = 10) -> list[str]:
+    """메모리 상위 프로세스를 앱별로 묶어 RSS 합으로 보여준다 (읽기만, 종료하지 않는다)."""
+    import re
+    import subprocess
+
+    out = subprocess.run(["ps", "-axo", "rss=,comm="], capture_output=True, text=True, check=True).stdout
+    groups = defaultdict(lambda: [0, 0])
+    for line in out.splitlines():
+        rss, _, comm = line.strip().partition(" ")
+        if not rss.isdigit():
+            continue
+        app = re.search(r"/([^/]+)\.app/", comm)
+        name = ("WebKit 웹 콘텐츠 (Safari 등)" if "com.apple.WebKit" in comm else
+                app.group(1) if app else comm.rsplit("/", 1)[-1])
+        groups[name][0] += int(rss)
+        groups[name][1] += 1
+    top = sorted(groups.items(), key=lambda kv: -kv[1][0])[:n]
+    return [", ".join(f"{k} {v[0] / 1048576:.2f} GiB" + (f" ({v[1]}개)" if v[1] > 1 else "") for k, v in top)]
+
+
+def apply_plan_report(cfg: dict, exp: dict, inputs=None) -> list[str]:
+    """103건 적용 계획: 캐시 없이 / 입력별 캐시 (같은 판단 입력은 한 번만). 호출 없음.
+    inputs가 있으면 그 입력만 센다. 이미 result.json이 있는 실행은 따로 표시한다."""
     paths = sorted((ROOT / "runs" / exp.get("run_name", "phase1")).glob("*/*/*/rep*.json"))
-    plan = RL.run_inputs([(p, json.loads(p.read_text(encoding="utf-8"))) for p in paths], load_rules())
+    recs = [(p, json.loads(p.read_text(encoding="utf-8"))) for p in paths]
+    if inputs:
+        recs = [(p, r) for p, r in recs if r["input"] in set(inputs)]
+    plan = RL.run_inputs(recs, load_rules())
     cached = RL.plan_calls(plan, cfg)
-    L = ["### 103건 적용 계획 (실행 안 함)", ""]
+    done_root = ROOT / "runs" / exp.get("run_name", "phase1") / "r3llm"
+    done = [it for it in cached if (done_root / it["record"]["model_name"] / it["record"]["set"] / it["record"]["input"]
+                                    / f"rep{it['record']['rep']}" / "result.json").exists()]
+    L = [f"### 적용 계획 (실행 안 함){' — 입력 ' + ', '.join(inputs) if inputs else ' — 전체'}", "",
+         f"- 묶음 상한: 추정 프롬프트 토큰 ≤ {RL.apply_limit(cfg)} (글자 수 / {cfg['batching']['chars_per_token']}), "
+         f"묶음당 {cfg['batching']['max_pairs_per_call']}쌍 이하, max_tokens {cfg['model']['max_tokens']}, "
+         f"n_ctx {cfg['model']['lmstudio']['context_length']}",
+         f"- 이미 result.json이 있는 실행: {len(done)}건" + (f" ({', '.join(sorted({it['record']['input'] for it in done}))})"
+                                                       if done else "")]
     rows = []
     for label, items, pairs_of in (("캐시 없음", plan, lambda it: it["pairs"]),
                                    ("입력별 캐시", cached, lambda it: it["new_pairs"])):

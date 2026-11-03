@@ -138,10 +138,15 @@ def messages_tokens(messages: list[dict], cfg: dict) -> int:
     return sum(estimate_tokens(m["content"], cfg) for m in messages) + 16 * len(messages)  # 역할 표시 등 여유
 
 
-def pack(pairs: list[Pair], cfg: dict) -> list[list[Pair]]:
-    """쌍을 순서대로 묶는다: 추정 프롬프트 토큰 + max_tokens + safety ≤ n_ctx, 묶음당 max_pairs_per_call 이하."""
+def pack(pairs: list[Pair], cfg: dict, max_prompt_tokens: int | None = None) -> list[list[Pair]]:
+    """쌍을 순서대로 묶는다: 추정 프롬프트 토큰 + max_tokens + safety ≤ n_ctx, 묶음당 max_pairs_per_call 이하.
+
+    max_prompt_tokens가 있으면 추정 프롬프트 토큰을 그 이하로 더 줄인다 (103건 적용, 2026-11-03 Jay: 4,000).
+    """
     b = cfg["batching"]
     budget = cfg["model"]["lmstudio"]["context_length"] - cfg["model"]["max_tokens"] - b["safety_tokens"]
+    if max_prompt_tokens:
+        budget = min(budget, max_prompt_tokens)
     batches, cur = [], []
     for p in pairs:
         trial = cur + [p]
@@ -320,8 +325,13 @@ def run_inputs(records_with_paths, rules: dict) -> list[dict]:
         stories, _ = read_input(slim)
         story_text = {s.idx: s.text for s in stories}
         pairs = make_pairs(candidate_pairs(nodes), story_text, cfg["sentences_per_name"])
-        out.append({"record": slim, "nodes": nodes, "pairs": pairs, "batches": pack(pairs, cfg)})
+        out.append({"record": slim, "nodes": nodes, "pairs": pairs, "batches": pack(pairs, cfg, apply_limit(cfg))})
     return out
+
+
+def apply_limit(cfg: dict) -> int | None:
+    """103건 적용 묶음의 추정 프롬프트 토큰 상한 (검증 묶음에는 쓰지 않는다)."""
+    return cfg["batching"].get("apply_max_prompt_tokens")
 
 
 def plan_calls(plan: list[dict], cfg: dict) -> list[dict]:
@@ -339,7 +349,8 @@ def plan_calls(plan: list[dict], cfg: dict) -> list[dict]:
                 new.append(p)
                 keys.add(k)
         cache |= keys
-        out.append({**item, "new_pairs": new, "batches": pack(new, cfg), "reused": len(item["pairs"]) - len(new)})
+        out.append({**item, "new_pairs": new, "batches": pack(new, cfg, apply_limit(cfg)),
+                    "reused": len(item["pairs"]) - len(new)})
     return out
 
 
@@ -357,16 +368,20 @@ def apply_merges(item: dict, decisions: dict[str, str | None]) -> dict:
             "same_pairs": sorted(sorted(s) for s in same)}
 
 
-def apply_runs(records_with_paths, rules: dict, guard: dict, out_root: Path) -> list[dict]:
+def apply_runs(records_with_paths, rules: dict, guard: dict, out_root: Path, inputs=None) -> list[dict]:
     """103건 적용: 입력별 캐시로 처음 나온 판단 입력만 묻고, 실행마다 result.json(쌍별 판단·재사용 여부·병합)을 남긴다.
 
     기록: out_root/<모델>/<세트>/<입력>/rep<k>/call<j>.json, result.json. 이미 있는 호출 기록은 다시 묻지 않는다 (멱등).
     생각이 나오면 멈춘다. 응답 누락 쌍은 캐시에 None으로 남기고 다시 묻지 않는다 (재시도 최대 1회 원칙)
+    inputs: 이 입력만 실행한다 (예: original, unambiguous, unambiguous@50). 캐시는 입력별이라 나눠 돌려도 같다
+    result.json이 이미 있는 실행은 다시 묻지 않고 그 판단으로 캐시를 채운다 (묶음 크기가 바뀌기 전 결과도 그대로 쓴다)
     """
     cfg = load_config()
     use_schema = cfg["apply"]["response_format"]
     if use_schema is None:
         raise ValueError("config/r3llm.yaml apply.response_format이 정해지지 않았다 (검증 결과를 보고 정한다). 실행하지 않는다")
+    if inputs:
+        records_with_paths = [(p, r) for p, r in records_with_paths if r["input"] in set(inputs)]
     plan = plan_calls(run_inputs(records_with_paths, rules), cfg)
     cache, results = {}, []
     with judge_session(cfg, guard, out_root) as (session, client):
@@ -374,6 +389,15 @@ def apply_runs(records_with_paths, rules: dict, guard: dict, out_root: Path) -> 
         for item in plan:
             r = item["record"]
             base = out_root / r["model_name"] / r["set"] / r["input"] / f"rep{r['rep']}"
+            if (base / "result.json").exists():
+                done = json.loads((base / "result.json").read_text(encoding="utf-8"))
+                if done["prompt_sha256"] != prompt_sha256(cfg):
+                    raise RecordMismatch(f"{base / 'result.json'}: 프롬프트 해시가 지금과 다르다. 멈춘다")
+                for x in done["pairs"]:
+                    cache.setdefault((r["input"], x["key"]), {k: x[k] for k in ("decision", "reason", "rep", "call")})
+                results.append(done)
+                print(f"  {r['input']} rep{r['rep']}: 기존 result.json 사용")
+                continue
             for j, b in enumerate(item["batches"], start=1):
                 path = base / f"call{j:02d}.json"
                 rec = run_batch(client, b, cfg, path, use_schema, True,
@@ -426,7 +450,9 @@ def judge_session(cfg: dict, guard: dict, log_dir: Path):
                 f.write(json.dumps(session, ensure_ascii=False, default=str) + "\n")
 
         lm = cfg["model"]["lmstudio"]
-        with lmstudio.smoke_model(lm, guard, on_close=on_close, exclusive=cfg["model"]["exclusive"]) as session:
+        ledger = ROOT / cfg["model"]["exclusive"]["ledger"]
+        exclusive = {**cfg["model"]["exclusive"], "ledger_path": ledger}
+        with lmstudio.smoke_model(lm, guard, on_close=on_close, exclusive=exclusive, ledger=ledger) as session:
             check = lmstudio.preflight(session["identifier"], guard, session["swap_baseline_gib"])
             model_cfg = {k: v for k, v in cfg["model"].items() if k not in ("name", "exclusive")}
             model_cfg["model"] = session["identifier"]

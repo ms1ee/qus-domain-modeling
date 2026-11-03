@@ -23,6 +23,7 @@ def main() -> None:
     val.add_argument("--conditions", nargs="+", default=None, help="기본: 설정의 조건 전부 (a b)")
     app = sub.add_parser("r3llm-apply", help="R3-LLM 103건 적용 (DRAFT, 입력별 캐시). 실행은 Jay 지시 후")
     app.add_argument("--dry-run", action="store_true", help="호출 없이 적용 계획(캐시 전후 호출 수·시간)과 메모리 검사만 출력")
+    app.add_argument("--inputs", nargs="+", default=None, help="이 입력만 (예: original unambiguous unambiguous@50)")
     sc = sub.add_parser("r3llm-score", help="R3-LLM 103건 적용 채점 (정제 전 / R1+R2 / R1+R2+R3-LLM) → results/r3llm_apply_<세트>")
     sc.add_argument("--partial", action="store_true", help="적용이 끝난 실행만 채점 (진행 중 확인용)")
     args = parser.parse_args()
@@ -80,8 +81,12 @@ def main() -> None:
 
         cfg, exp = load_config(), experiment_config()
         if args.dry_run:
-            print("\n".join(apply_plan_report(cfg, exp) + ["### 메모리·공존 규칙 검사 (읽기만)", ""]
-                            + memory_report(cfg, exp["memory_guard"])))
+            from .r3llm_validation import top_processes
+
+            print("\n".join(apply_plan_report(cfg, exp, args.inputs)
+                            + (apply_plan_report(cfg, exp) if args.inputs else [])
+                            + ["### 메모리·공존 규칙 검사 (읽기만)", ""] + memory_report(cfg, exp["memory_guard"])
+                            + ["- 메모리 상위 (앱별 RSS 합, 읽기만): " + top_processes()[0]]))
         else:
             import json
 
@@ -92,7 +97,7 @@ def main() -> None:
             root = ROOT / "runs" / exp.get("run_name", "phase1")
             paths = sorted(root.glob("*/*/*/rep*.json"))
             apply_runs([(p, json.loads(p.read_text(encoding="utf-8"))) for p in paths], load_rules(),
-                       exp["memory_guard"], root / "r3llm")
+                       exp["memory_guard"], root / "r3llm", inputs=args.inputs)
     elif args.command == "r3llm-score":
         from .r3llm_eval import evaluate as r3llm_score
 

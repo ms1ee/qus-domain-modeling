@@ -269,3 +269,46 @@ def test_apply_runs_end_to_end_with_fake_session(monkeypatch, tmp_path):
     before = Judge.calls
     again = RL.apply_runs(records, load_rules(), {}, tmp_path)  # 기록이 있으면 다시 묻지 않는다
     assert Judge.calls == before and [r["kept"] for r in again] == [r["kept"] for r in results]
+
+
+def test_apply_prompt_limit_makes_smaller_batches():
+    pairs = [RL.Pair(f"a{i}", f"b{i}", ("x" * 300,) * 2, ("y" * 300,) * 2) for i in range(40)]
+    small = RL.pack(pairs, CFG, 4000)
+    assert len(small) > len(RL.pack(pairs, CFG))
+    assert all(RL.messages_tokens(RL.build_messages(b, CFG), CFG) <= 4000 for b in small)
+    assert RL.apply_limit(CFG) == 4000
+
+
+def test_apply_runs_inputs_filter_and_reuse_of_existing_results(monkeypatch, tmp_path):
+    from contextlib import contextmanager
+
+    base = ROOT / "runs" / "smoke" / "mistral-7b-local" / "school"
+    paths = [base / "unambiguous@50" / "rep1.json", base / "unambiguous@50" / "rep2.json", base / "original" / "rep1.json"]
+    if not all(p.exists() for p in paths):
+        pytest.skip("스모크 실행 기록 없음")
+    records = [(p, json.loads(p.read_text())) for p in paths]
+
+    class Judge:
+        calls = 0
+
+        def chat(self, messages, response_format=None):
+            Judge.calls += 1
+            pairs = json.loads(messages[1]["content"].split("\n", 1)[1])
+            text = json.dumps({"pairs": [{"a": p["a"], "b": p["b"], "decision": "different", "reason": "r"}
+                                         for p in pairs]})
+            return LLMResponse(text=text, model="m", stop_reason="stop", input_tokens=10, output_tokens=5,
+                               raw=_raw(text), elapsed_s=0.1, request={"model": "m"})
+
+    @contextmanager
+    def fake_session(cfg, guard, log_dir):
+        yield {"identifier": "x", "runtime": {}}, Judge()
+
+    monkeypatch.setattr(RL, "judge_session", fake_session)
+    monkeypatch.setattr(RL, "load_config", lambda: {**CFG, "apply": {"response_format": True}})
+    first = RL.apply_runs(records[:1], load_rules(), {}, tmp_path, inputs=["unambiguous@50"])
+    assert [r["record"]["rep"] for r in first] == [1]
+    n1 = Judge.calls
+    both = RL.apply_runs(records, load_rules(), {}, tmp_path, inputs=["unambiguous@50"])  # original은 빠진다
+    assert [(r["record"]["input"], r["record"]["rep"]) for r in both] == [("unambiguous@50", 1), ("unambiguous@50", 2)]
+    plan = RL.plan_calls(RL.run_inputs(records[:2], load_rules()), CFG)
+    assert Judge.calls - n1 == len(plan[1]["batches"]) and both[1]["n_reused"] == plan[1]["reused"]
