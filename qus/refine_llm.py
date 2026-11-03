@@ -85,7 +85,18 @@ def sentences(node: dict, story_text: dict[int, str], k: int) -> tuple:
 
 
 def make_pairs(node_pairs, story_text: dict[int, str], k: int) -> list[Pair]:
-    return [Pair(a["name"], b["name"], sentences(a, story_text, k), sentences(b, story_text, k)) for a, b in node_pairs]
+    """쌍 안 a·b는 이름순(대소문자 무시)으로 둔다. 실행마다 출력 순서가 달라도 같은 판단 입력이 되게 한다 (캐시 키)."""
+    out = []
+    for a, b in node_pairs:
+        if (_norm(b["name"]), b["name"]) < (_norm(a["name"]), a["name"]):
+            a, b = b, a
+        out.append(Pair(a["name"], b["name"], sentences(a, story_text, k), sentences(b, story_text, k)))
+    return out
+
+
+def pair_key(p: Pair) -> str:
+    """판단 입력(두 이름 + 문장)의 sha256. 같은 입력(유형·비율) 안에서 판단을 재사용하는 캐시 키."""
+    return _sha256_text(json.dumps(p.payload(), ensure_ascii=False, sort_keys=True))
 
 
 # --------------------------------------------------------------------------- 프롬프트·묶음
@@ -313,21 +324,76 @@ def run_inputs(records_with_paths, rules: dict) -> list[dict]:
     return out
 
 
-def apply_merges(item: dict, records: list[dict]) -> dict:
-    """한 실행의 호출 기록들 → same 키 쌍 → 병합 결과 (kept, removed)."""
-    same = set()
-    for batch, rec in zip(item["batches"], records):
-        for p, d in zip(batch, decisions_of(rec, len(batch))):
-            if d == "same":
-                ka = next(n["key"] for n in item["nodes"] if n["name"] == p.a)
-                kb = next(n["key"] for n in item["nodes"] if n["name"] == p.b)
-                same.add(frozenset((ka, kb)))
+def plan_calls(plan: list[dict], cfg: dict) -> list[dict]:
+    """입력별 캐시를 적용한 호출 계획. 실행 순서(입력, rep)대로 훑으며 그 입력에서 처음 나온 판단 입력만 새로 묶는다.
+
+    → 계획 항목마다 new_pairs(이번 실행에서 처음 묻는 쌍), batches(그 묶음), reused(앞 실행의 판단을 쓰는 쌍 수)
+    """
+    seen, out = {}, []
+    for item in sorted(plan, key=lambda it: (it["record"]["input"], it["record"]["rep"])):
+        cache = seen.setdefault(item["record"]["input"], set())
+        new, keys = [], set()
+        for p in item["pairs"]:
+            k = pair_key(p)
+            if k not in cache and k not in keys:
+                new.append(p)
+                keys.add(k)
+        cache |= keys
+        out.append({**item, "new_pairs": new, "batches": pack(new, cfg), "reused": len(item["pairs"]) - len(new)})
+    return out
+
+
+def apply_merges(item: dict, decisions: dict[str, str | None]) -> dict:
+    """한 실행의 쌍별 판단(판단 입력 해시 → 판단) → same 키 쌍 → 병합 결과 (kept, removed)."""
+    by_name = {}
+    for n in item["nodes"]:
+        by_name.setdefault(n["name"], n["key"])
+    same = {frozenset((by_name[p.a], by_name[p.b])) for p in item["pairs"] if decisions.get(pair_key(p)) == "same"}
     hits = merge_same(item["nodes"], same)
     gone = {id(n) for n, _ in hits}
     return {"kept": [n["name"] for n in item["nodes"] if id(n) not in gone],
             "removed": [{"name": n["name"], "key": n["key"], "order": n["order"], "rule": RULE_ID, **why}
                         for n, why in hits],
             "same_pairs": sorted(sorted(s) for s in same)}
+
+
+def apply_runs(records_with_paths, rules: dict, guard: dict, out_root: Path) -> list[dict]:
+    """103건 적용: 입력별 캐시로 처음 나온 판단 입력만 묻고, 실행마다 result.json(쌍별 판단·재사용 여부·병합)을 남긴다.
+
+    기록: out_root/<모델>/<세트>/<입력>/rep<k>/call<j>.json, result.json. 이미 있는 호출 기록은 다시 묻지 않는다 (멱등).
+    생각이 나오면 멈춘다. 응답 누락 쌍은 캐시에 None으로 남기고 다시 묻지 않는다 (재시도 최대 1회 원칙)
+    """
+    cfg = load_config()
+    use_schema = cfg["apply"]["response_format"]
+    if use_schema is None:
+        raise ValueError("config/r3llm.yaml apply.response_format이 정해지지 않았다 (검증 결과를 보고 정한다). 실행하지 않는다")
+    plan = plan_calls(run_inputs(records_with_paths, rules), cfg)
+    cache, results = {}, []
+    with judge_session(cfg, guard, out_root) as (session, client):
+        meta = session_meta(session)
+        for item in plan:
+            r = item["record"]
+            base = out_root / r["model_name"] / r["set"] / r["input"] / f"rep{r['rep']}"
+            for j, b in enumerate(item["batches"], start=1):
+                path = base / f"call{j:02d}.json"
+                rec = run_batch(client, b, cfg, path, use_schema, True,
+                                context={"kind": "apply", "input": r["input"], "rep": r["rep"], "call": j,
+                                         "calls": len(item["batches"]), "session": meta})
+                for i, p in enumerate(b):
+                    d = rec["parse"]["decisions"].get(str(i)) or rec["parse"]["decisions"].get(i) or {}
+                    cache[(r["input"], pair_key(p))] = {"decision": d.get("decision"), "reason": d.get("reason"),
+                                                        "rep": r["rep"], "call": str(path.relative_to(out_root))}
+            decisions = {pair_key(p): cache[(r["input"], pair_key(p))]["decision"] for p in item["pairs"]}
+            pairs = [{"a": p.a, "b": p.b, "key": pair_key(p), **cache[(r["input"], pair_key(p))],
+                      "reused": cache[(r["input"], pair_key(p))]["rep"] != r["rep"]} for p in item["pairs"]]
+            result = {"record": r, "prompt_sha256": prompt_sha256(cfg), "response_format": use_schema,
+                      "pairs": pairs, "n_pairs": len(pairs), "n_new": len(item["new_pairs"]),
+                      "n_reused": item["reused"], "calls": len(item["batches"]), **apply_merges(item, decisions)}
+            _write_json(base / "result.json", result)
+            results.append(result)
+            print(f"  {r['input']} rep{r['rep']}: 쌍 {len(pairs)} (새로 {len(item['new_pairs'])}, 재사용 {item['reused']}), "
+                  f"호출 {len(item['batches'])}, 병합 {len(result['removed'])}")
+    return results
 
 
 # --------------------------------------------------------------------------- LM Studio 세션

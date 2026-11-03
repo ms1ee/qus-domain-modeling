@@ -184,7 +184,44 @@ def test_judge_path_reads_no_injection_log_or_gold(monkeypatch, tmp_path):
     batch = plan["batches"][0]
     content = json.dumps({"pairs": [{"a": p.a, "b": p.b, "decision": "different", "reason": "r"} for p in batch]})
     rec = RL.run_batch(FakeClient(content), batch, RL.load_config(), tmp_path / "call01.json", True, True, {})
-    RL.apply_merges({**plan, "batches": [batch]}, [rec])
+    decisions = {RL.pair_key(q): (rec["parse"]["decisions"].get(i) or {}).get("decision") for i, q in enumerate(batch)}
+    RL.apply_merges(plan, decisions)
     assert opened
     bad = [p for p in opened if any(f in p for f in ("smoke_injection", ".jsonl", "meta.json", "gold"))]
     assert bad == []
+
+
+# --------------------------------------------------------------------------- 103건 적용: 입력별 캐시
+
+def test_make_pairs_orients_by_name_so_cache_keys_match():
+    t = {1: "s1", 2: "s2"}
+    x = RL.make_pairs([(_node("Timetable", [1], 0), _node("roster", [2], 1))], t, 2)[0]
+    y = RL.make_pairs([(_node("roster", [2], 0), _node("Timetable", [1], 1))], t, 2)[0]
+    assert (x.a, x.b) == ("roster", "Timetable") and RL.pair_key(x) == RL.pair_key(y)
+    assert RL.pair_key(x) != RL.pair_key(RL.Pair("roster", "Timetable", ("other",), ("s1",)))
+
+
+def test_plan_calls_asks_each_judgment_input_once_per_input():
+    p1, p2, p3 = RL.Pair("a", "b", ("s",), ("t",)), RL.Pair("a", "c", ("s",), ("u",)), RL.Pair("b", "c", ("t",), ("u",))
+    plan = [{"record": {"input": "original", "rep": 2}, "pairs": [p1, p3]},
+            {"record": {"input": "original", "rep": 1}, "pairs": [p1, p2]},
+            {"record": {"input": "minimal", "rep": 1}, "pairs": [p1]}]
+    out = RL.plan_calls(plan, CFG)
+    got = {(o["record"]["input"], o["record"]["rep"]): ([q.b for q in o["new_pairs"]], o["reused"], len(o["batches"]))
+           for o in out}
+    assert got == {("original", 1): (["b", "c"], 0, 1), ("original", 2): (["c"], 1, 1),  # p1 재사용, p3 새로
+                   ("minimal", 1): (["b"], 0, 1)}                                           # 입력이 다르면 다시 묻는다
+
+
+def test_apply_merges_uses_cached_decisions():
+    nodes = [_node("Roster", [5], 0), _node("Timetable", [1, 2], 1)]
+    pair = RL.Pair("Roster", "Timetable")
+    out = RL.apply_merges({"nodes": nodes, "pairs": [pair]}, {RL.pair_key(pair): "same"})
+    assert out["kept"] == ["Timetable"] and out["removed"][0]["merged_into"] == "Timetable"
+    assert RL.apply_merges({"nodes": nodes, "pairs": [pair]}, {RL.pair_key(pair): "unsure"})["removed"] == []
+
+
+def test_apply_refuses_to_run_before_response_format_is_decided(monkeypatch, tmp_path):
+    monkeypatch.setattr(RL, "load_config", lambda: {**CFG, "apply": {"response_format": None}})
+    with pytest.raises(ValueError, match="response_format"):
+        RL.apply_runs([], load_rules(), {}, tmp_path)

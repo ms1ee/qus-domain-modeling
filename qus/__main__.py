@@ -21,6 +21,8 @@ def main() -> None:
     val = sub.add_parser("r3llm-validate", help="R3-LLM 판단기 검증 (DRAFT, qwen/qwen3-8b, environment.md 1-1)")
     val.add_argument("--dry-run", action="store_true", help="호출 없이 검증 세트·103건 적용 계획·메모리 검사만 출력")
     val.add_argument("--conditions", nargs="+", default=None, help="기본: 설정의 조건 전부 (a b)")
+    app = sub.add_parser("r3llm-apply", help="R3-LLM 103건 적용 (DRAFT, 입력별 캐시). 실행은 Jay 지시 후")
+    app.add_argument("--dry-run", action="store_true", help="호출 없이 적용 계획(캐시 전후 호출 수·시간)과 메모리 검사만 출력")
     args = parser.parse_args()
 
     from .config import use_config
@@ -69,6 +71,26 @@ def main() -> None:
             print(dry_run())
         else:
             validate(args.conditions)
+    elif args.command == "r3llm-apply":
+        from .config import experiment_config
+        from .r3llm_validation import apply_plan_report, memory_report
+        from .refine_llm import load_config
+
+        cfg, exp = load_config(), experiment_config()
+        if args.dry_run:
+            print("\n".join(apply_plan_report(cfg, exp) + ["### 메모리·공존 규칙 검사 (읽기만)", ""]
+                            + memory_report(cfg, exp["memory_guard"])))
+        else:
+            import json
+
+            from .config import ROOT
+            from .refine_kg import load_rules
+            from .refine_llm import apply_runs
+
+            root = ROOT / "runs" / exp.get("run_name", "phase1")
+            paths = sorted(root.glob("*/*/*/rep*.json"))
+            apply_runs([(p, json.loads(p.read_text(encoding="utf-8"))) for p in paths], load_rules(),
+                       exp["memory_guard"], root / "r3llm")
 
 
 if __name__ == "__main__":

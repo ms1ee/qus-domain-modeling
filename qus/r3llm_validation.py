@@ -193,29 +193,44 @@ def dry_run() -> str:
          f"max_tokens {cfg['model']['max_tokens']}, n_ctx {cfg['model']['lmstudio']['context_length']}",
          f"- 추정 출력 토큰 (쌍당 {cfg['estimate']['output_tokens_per_pair']}): {_fmt_tokens(outt)}",
          f"- 추정 시간: 조건당 {secs:.0f} s, 두 조건 {secs * len(conds):.0f} s (+ 로드·언로드)", ""]
-    # 103건 적용 (실행 안 함)
-    paths = sorted((ROOT / "runs" / exp.get("run_name", "phase1")).glob("*/*/*/rep*.json"))
-    plan = RL.run_inputs([(p, json.loads(p.read_text(encoding="utf-8"))) for p in paths], load_rules())
-    all_b = [b for it in plan for b in it["batches"]]
-    p2, o2, s2 = _tokens_and_time(all_b, cfg)
-    per_run_pairs = [len(it["pairs"]) for it in plan]
-    per_input = defaultdict(lambda: [0, 0, 0])
-    for it in plan:
-        v = per_input[it["record"]["input"]]
-        v[0] += 1
-        v[1] += len(it["pairs"])
-        v[2] += len(it["batches"])
-    L += ["### 103건 적용 (실행 안 함, 검증 결과를 본 뒤 Jay가 따로 지시)", "",
-          f"- 실행 {len(plan)}건, 후보 쌍 합 {sum(per_run_pairs):,} (실행당 평균 {statistics.mean(per_run_pairs):.1f}, 최대 {max(per_run_pairs)}), "
-          f"호출 {len(all_b):,}회 (실행당 평균 {len(all_b) / len(plan):.1f})",
-          f"- 호출당 추정 프롬프트 토큰: {_fmt_tokens(p2)}; 추정 출력 토큰: {_fmt_tokens(o2)}",
-          f"- 추정 시간: {s2 / 3600:.1f} h (+ 로드·언로드)",
-          "- 입력별 (실행, 후보 쌍, 호출): " + "; ".join(f"{k} {v[0]}/{v[1]}/{v[2]}" for k, v in per_input.items()), "",
-          "### 메모리·공존 규칙 검사 (읽기만, 로드 없음)", ""]
+    L += apply_plan_report(cfg, exp)
+    L += ["### 메모리·공존 규칙 검사 (읽기만, 로드 없음)", ""]
     L += memory_report(cfg, exp["memory_guard"])
     L += ["", f"시간 추정 근거: 다른 연구 LM Studio 로그(2026-11-01–02, Qwen3-8B Q4_K_M) 중앙값 프롬프트 "
           f"{cfg['estimate']['prompt_tokens_per_s']} tok/s, 생성 {cfg['estimate']['gen_tokens_per_s']} tok/s"]
     return "\n".join(L)
+
+
+def apply_plan_report(cfg: dict, exp: dict) -> list[str]:
+    """103건 적용 계획: 캐시 없이 / 입력별 캐시 (같은 판단 입력은 한 번만). 호출 없음."""
+    paths = sorted((ROOT / "runs" / exp.get("run_name", "phase1")).glob("*/*/*/rep*.json"))
+    plan = RL.run_inputs([(p, json.loads(p.read_text(encoding="utf-8"))) for p in paths], load_rules())
+    cached = RL.plan_calls(plan, cfg)
+    L = ["### 103건 적용 계획 (실행 안 함)", ""]
+    rows = []
+    for label, items, pairs_of in (("캐시 없음", plan, lambda it: it["pairs"]),
+                                   ("입력별 캐시", cached, lambda it: it["new_pairs"])):
+        bs = [b for it in items for b in it["batches"]]
+        p_tok, o_tok, secs = _tokens_and_time(bs, cfg)
+        rows.append((label, sum(len(pairs_of(it)) for it in items), len(bs), p_tok, o_tok, secs))
+    total = sum(len(it["pairs"]) for it in plan)
+    L += [f"- 실행 {len(plan)}건, 후보 쌍 합 {total:,} (실행당 평균 {total / len(plan):.1f}, "
+          f"최대 {max(len(it['pairs']) for it in plan)})"]
+    for label, n_ask, n_calls, p_tok, o_tok, secs in rows:
+        L += [f"- {label}: 묻는 쌍 {n_ask:,}, 호출 {n_calls:,}회, 추정 시간 {secs / 3600:.2f} h (+ 로드·언로드); "
+              f"호출당 추정 프롬프트 토큰 {_fmt_tokens(p_tok)}, 출력 토큰 {_fmt_tokens(o_tok)}"]
+    per_input = defaultdict(lambda: [0, 0, 0, 0, 0])
+    for a, c in zip(sorted(plan, key=lambda it: (it["record"]["input"], it["record"]["rep"])), cached):
+        v = per_input[c["record"]["input"]]
+        v[0] += 1
+        v[1] += len(c["pairs"])
+        v[2] += len(c["new_pairs"])
+        v[3] += len(a["batches"])
+        v[4] += len(c["batches"])
+    L += ["", "| 입력 | 실행 | 후보 쌍 | 새로 묻는 쌍 (캐시) | 호출 (캐시 없음) | 호출 (캐시) |", "|---|---|---|---|---|---|"]
+    L += [f"| {k} | {v[0]} | {v[1]:,} | {v[2]:,} | {v[3]} | {v[4]} |" for k, v in sorted(per_input.items())]
+    L += ["", f"- 적용 조건 apply.response_format: {cfg['apply']['response_format']} (null이면 실행하지 않는다)", ""]
+    return L
 
 
 # --------------------------------------------------------------------------- 실행과 요약

@@ -257,8 +257,8 @@ def recent_server_activity(minutes: float, own_identifiers=(), now: datetime | N
                 if model not in own_identifiers:
                     found.append(f"{f.name}: {line[:120]} (model={model})")
             elif re.search(r"Endpoint=(loadModel|unloadModel)\]", line):
-                target = re.search(r"(?:Loading|Unloading) model: (\S+)", line)
-                if not target or target.group(1) not in own_identifiers:
+                target = re.search(r"(?:Loading|Unloading) model: (\S+)", line)  # 로드 1번에 여러 줄이 남으므로 이 줄만 센다
+                if target and target.group(1) not in own_identifiers:
                     found.append(f"{f.name}: {line[:160]}")
     return found
 

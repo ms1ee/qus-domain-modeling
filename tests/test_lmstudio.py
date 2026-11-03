@@ -329,6 +329,7 @@ def test_recent_server_activity_counts_other_requests_and_loads_only(tmp_path, m
         "[2026-11-03 10:10:00][DEBUG] Received request: POST to /v1/chat/completions with body {",
         '  "model": "qwen/qwen3-8b",',
         "[2026-11-03 10:15:00][INFO][LMSAuthenticator][Client=lms-cli][Endpoint=loadModel] Loading model: qwen/qwen3-8b",
+        "[2026-11-03 10:15:00][DEBUG][LMSAuthenticator][Client=lms-cli][Endpoint=loadModel] Found 1 model(s) for key: qwen/qwen3-8b",
     ])
     found = lm.recent_server_activity(30, ("r3llm-qwen3-8b",), now)
     assert len(found) == 2 and "model=qwen/qwen3-8b" in found[0]
