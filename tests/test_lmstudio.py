@@ -302,3 +302,58 @@ def test_cache_label_thresholds():
     assert lm.cache_label(2523, 2508) == "새로 계산"  # 템플릿 앞부분 15토큰만 재사용
     assert lm.cache_label(2521, 60) == "부분 재사용"
     assert lm.cache_label(2553, 1) == "전체 재사용"
+
+
+# --------------------------------------------------------------------------- 시간 분할 사용 조건 (environment.md 1-1)
+
+def _log(tmp_path, lines):
+    d = tmp_path / "2026-11"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "2026-11-03.1.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_recent_server_activity_counts_other_requests_and_loads_only(tmp_path, monkeypatch):
+    from datetime import datetime
+    monkeypatch.setattr(lm, "SERVER_LOGS", tmp_path)
+    _log(tmp_path, [
+        "[2026-11-03 09:00:00][DEBUG] Received request: POST to /v1/chat/completions with body {",
+        '  "model": "qwen/qwen3-8b",',
+        "[2026-11-03 10:20:00][INFO][LMSAuthenticator][Client=lms-cli][Endpoint=listLoaded] Listing loaded models",
+        "[2026-11-03 10:21:00][DEBUG] Received request: POST to /v1/chat/completions with body {",
+        '  "model": "r3llm-qwen3-8b",',
+        "[2026-11-03 10:22:00][INFO][LMSAuthenticator][Client=lms-cli][Endpoint=unloadModel] Unloading model: r3llm-qwen3-8b",
+    ])
+    now = datetime(2026, 11, 3, 10, 30)
+    assert lm.recent_server_activity(30, ("r3llm-qwen3-8b",), now) == []          # 오래된 요청, 조회, 우리 요청·언로드
+    _log(tmp_path, [
+        "[2026-11-03 10:10:00][DEBUG] Received request: POST to /v1/chat/completions with body {",
+        '  "model": "qwen/qwen3-8b",',
+        "[2026-11-03 10:15:00][INFO][LMSAuthenticator][Client=lms-cli][Endpoint=loadModel] Loading model: qwen/qwen3-8b",
+    ])
+    found = lm.recent_server_activity(30, ("r3llm-qwen3-8b",), now)
+    assert len(found) == 2 and "model=qwen/qwen3-8b" in found[0]
+    probs = lm.exclusive_problems({"require_empty": True, "quiet_minutes": 30, "own_identifiers": []}, [OTHER], now)
+    assert len(probs) == 2 and "비어 있지 않다" in probs[0]
+
+
+def test_exclusive_session_never_reuses_or_loads_when_conditions_fail(fake, monkeypatch):
+    excl = {"require_empty": True, "quiet_minutes": 30, "own_identifiers": ["r3llm-qwen3-8b"]}
+    qwen = {"model_key": "qwen/qwen3-8b", "identifier": "r3llm-qwen3-8b", "context_length": 8192, "ttl": 900,
+            "parallel": 1, "model_file_bytes": 5027783968, "kv_bytes_per_token": 147456}
+    theirs = {"identifier": "qwen/qwen3-8b", "modelKey": "qwen/qwen3-8b", "contextLength": 8192, "parallel": 1}
+    f = fake([theirs])
+    monkeypatch.setattr(lm, "recent_server_activity", lambda *a, **k: [])
+    with pytest.raises(RuntimeError, match="시간 분할"):
+        with lm.smoke_model(qwen, GUARD, exclusive=excl):
+            pytest.fail("이미 로드된 같은 모델을 재사용하면 안 된다")
+    assert f.commands == [] and f.loaded == [theirs]
+    f = fake([])
+    monkeypatch.setattr(lm, "recent_server_activity", lambda *a, **k: ["x.log: 다른 요청"])
+    with pytest.raises(RuntimeError, match="다른 활동"):
+        with lm.smoke_model(qwen, GUARD, exclusive=excl):
+            pytest.fail("최근 다른 활동이 있으면 로드하면 안 된다")
+    assert f.commands == []
+    monkeypatch.setattr(lm, "recent_server_activity", lambda *a, **k: [])
+    with lm.smoke_model(qwen, GUARD, exclusive=excl) as s:
+        assert s["loaded_by_us"]
+    assert f.commands[-1] == ("unload", "r3llm-qwen3-8b") and f.loaded == []

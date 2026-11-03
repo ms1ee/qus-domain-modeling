@@ -230,6 +230,51 @@ def server_call_info(response_id: str | None, wait_s: float = 3.0, files: int = 
         time.sleep(0.3)
 
 
+_LOG_TS = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\]")
+
+
+def recent_server_activity(minutes: float, own_identifiers=(), now: datetime | None = None, files: int = 2) -> list[str]:
+    """최근 minutes분 서버 로그의 다른 요청·로드·언로드 줄 (environment.md 1-1). 읽기만 한다.
+
+    - 추론 요청(`Received request: POST`)은 본문의 "model"이 own_identifiers에 있으면 뺀다
+    - 모델 로드·언로드(`Endpoint=loadModel/unloadModel`)는 대상이 own_identifiers에 있으면 뺀다.
+      로드 줄에는 모델 키만 남으므로 우리 이전 세션의 로드도 "다른 활동"으로 잡힌다 (보수적)
+    - 조회(lms ps, lms ls 등)는 세지 않는다
+    """
+    now = now or datetime.now()
+    since = now.timestamp() - minutes * 60
+    logs = sorted(SERVER_LOGS.glob("*/*.log"), key=lambda f: f.stat().st_mtime, reverse=True)[:files]
+    found = []
+    for f in logs:
+        lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+        for i, line in enumerate(lines):
+            m = _LOG_TS.match(line)
+            if not m or datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp() < since:
+                continue
+            if "Received request: POST" in line:
+                model = next((mm.group(1) for l2 in lines[i + 1:i + 15]
+                              for mm in [re.search(r'"model":\s*"([^"]+)"', l2)] if mm), None)
+                if model not in own_identifiers:
+                    found.append(f"{f.name}: {line[:120]} (model={model})")
+            elif re.search(r"Endpoint=(loadModel|unloadModel)\]", line):
+                target = re.search(r"(?:Loading|Unloading) model: (\S+)", line)
+                if not target or target.group(1) not in own_identifiers:
+                    found.append(f"{f.name}: {line[:160]}")
+    return found
+
+
+def exclusive_problems(exclusive: dict, before: list[dict], now: datetime | None = None) -> list[str]:
+    """시간 분할 사용 조건 (environment.md 1-1): 로드 목록이 비어 있고, 최근 quiet_minutes분에 다른 활동이 없을 것."""
+    out = []
+    if exclusive.get("require_empty") and before:
+        out.append(f"로드 목록이 비어 있지 않다: {_identifiers(before)}")
+    activity = recent_server_activity(exclusive.get("quiet_minutes", 30), exclusive.get("own_identifiers", ()), now)
+    if activity:
+        out.append(f"최근 {exclusive.get('quiet_minutes', 30)}분 서버 로그에 다른 활동 {len(activity)}건 "
+                   f"(마지막: {activity[-1]})")
+    return out
+
+
 def model_file_fingerprint(lm_cfg: dict) -> dict:
     """GGUF 파일의 SHA-256과 크기 (읽기만 한다). 크기가 설정과 다르면 파일이 바뀐 것이다.
 
@@ -270,13 +315,20 @@ def _raise_terminated(signum, frame):
 
 
 @contextmanager
-def smoke_model(lm_cfg: dict, guard: dict, on_close=None):
+def smoke_model(lm_cfg: dict, guard: dict, on_close=None, exclusive: dict | None = None):
     """스모크용 모델을 올리고 끝나면 (성공·실패·중단 모두) 내린다. session dict를 넘긴다.
 
     on_close(session): 종료 처리가 끝난 뒤 부른다 (실행 기록 디렉토리에 세션 기록을 남기는 용도).
+    exclusive: 시간 분할 사용 조건 (environment.md 1-1, qwen/qwen3-8b). 있으면 로드 목록이 비어 있고 최근 서버 활동이
+      없을 때만 진행하고, 같은 모델 키가 이미 로드돼 있어도 재사용하지 않고 멈춘다
     """
     ident, key = lm_cfg["identifier"], lm_cfg["model_key"]
     before = loaded_models()
+    if exclusive:
+        problems = exclusive_problems(exclusive, before)
+        if problems:
+            raise RuntimeError("시간 분할 사용 조건 미충족 (environment.md 1-1): " + "; ".join(problems)
+                               + ". 로드하지 않고 멈춘다")
     session = {"started_at": _now(), "model_key": key, "identifier": ident, "loaded_by_us": False,
                "load_options": {k: lm_cfg[k] for k in ("context_length", "ttl", "parallel") if k in lm_cfg},
                "before_loaded": before,

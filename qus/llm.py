@@ -118,8 +118,14 @@ class OpenAICompatibleClient:
             raise TransientError(f"{type(e).__name__}: {e}") from e
 
     def complete(self, prompt: str) -> LLMResponse:
+        return self.chat([{"role": "user", "content": prompt}])
+
+    def chat(self, messages: list[dict], response_format: dict | None = None) -> LLMResponse:
+        """메시지 목록(시스템 메시지 포함)으로 호출한다. response_format이 있으면 요청에 그대로 넣는다 (json_schema 강제)."""
         request = {"model": self.model, **self.params, "stream": False}
-        payload = {**request, "messages": [{"role": "user", "content": prompt}]}
+        if response_format is not None:
+            request["response_format"] = response_format
+        payload = {**request, "messages": messages}
         errors = []
         while True:
             checked = self.preflight() if self.preflight else None
