@@ -172,7 +172,8 @@ def _run_model(model_name: str, model_cfg: dict, jobs: list[tuple], infos: dict)
     from . import lmstudio
 
     guard = experiment_config()["memory_guard"]
-    with lmstudio.smoke_model(lm_cfg, guard, on_close=lambda s: _append_jsonl("sessions.jsonl", s)) as session:
+    with lmstudio.smoke_model(lm_cfg, guard, on_close=lambda s: _append_jsonl("sessions.jsonl", s),
+                              ledger=ROOT / "runs" / "ledger.jsonl") as session:
         check = lmstudio.preflight(session["identifier"], guard, session["swap_baseline_gib"])
         _run_jobs(lambda rep: make_client({**rep_model_config(model_cfg, rep), "model": session["identifier"]},
                                           preflight=check, postflight=lmstudio.server_call_info),

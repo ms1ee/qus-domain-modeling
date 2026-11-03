@@ -233,14 +233,46 @@ def server_call_info(response_id: str | None, wait_s: float = 3.0, files: int = 
 _LOG_TS = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\]")
 
 
-def recent_server_activity(minutes: float, own_identifiers=(), now: datetime | None = None, files: int = 2) -> list[str]:
+def append_ledger(path, entry: dict) -> None:
+    """우리 로드·언로드 원장 (environment.md 1-1 보완, 2026-11-03). 명령을 보내기 직전에 한 줄씩 덧붙인다."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now()
+    row = {"at": now.isoformat(timespec="seconds"), "at_utc": _now(), **entry}
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def read_ledger(path) -> list[dict]:
+    path = Path(path) if path else None
+    if not path or not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _in_ledger(action: str, target: str, when: datetime, ledger: list[dict], tolerance_s: float) -> bool:
+    """서버 로그의 로드·언로드 줄이 원장의 우리 기록과 ±tolerance_s 안에서 맞는지.
+    로드 줄의 대상은 모델 키, 언로드 줄의 대상은 identifier다."""
+    for e in ledger:
+        if e.get("action") != action:
+            continue
+        if target not in (e.get("model_key"), e.get("identifier")):
+            continue
+        if abs((datetime.fromisoformat(e["at"]) - when).total_seconds()) <= tolerance_s:
+            return True
+    return False
+
+
+def recent_server_activity(minutes: float, own_identifiers=(), now: datetime | None = None, files: int = 2,
+                           ledger: list[dict] | None = None, tolerance_s: float = 10) -> list[str]:
     """최근 minutes분 서버 로그의 다른 요청·로드·언로드 줄 (environment.md 1-1). 읽기만 한다.
 
     - 추론 요청(`Received request: POST`)은 본문의 "model"이 own_identifiers에 있으면 뺀다
-    - 모델 로드·언로드(`Endpoint=loadModel/unloadModel`)는 대상이 own_identifiers에 있으면 뺀다.
-      로드 줄에는 모델 키만 남으므로 우리 이전 세션의 로드도 "다른 활동"으로 잡힌다 (보수적)
+    - 모델 로드·언로드(`Endpoint=loadModel/unloadModel`)는 원장(ledger)의 우리 기록과 ±tolerance_s 안에서 맞으면 뺀다
+      (2026-11-03 Jay 승인). 언로드 대상이 own_identifiers인 줄도 뺀다. 원장에 없는 로드는 "다른 활동"이다
     - 조회(lms ps, lms ls 등)는 세지 않는다
     """
+    ledger = ledger or []
     now = now or datetime.now()
     since = now.timestamp() - minutes * 60
     logs = sorted(SERVER_LOGS.glob("*/*.log"), key=lambda f: f.stat().st_mtime, reverse=True)[:files]
@@ -257,8 +289,14 @@ def recent_server_activity(minutes: float, own_identifiers=(), now: datetime | N
                 if model not in own_identifiers:
                     found.append(f"{f.name}: {line[:120]} (model={model})")
             elif re.search(r"Endpoint=(loadModel|unloadModel)\]", line):
-                target = re.search(r"(?:Loading|Unloading) model: (\S+)", line)  # 로드 1번에 여러 줄이 남으므로 이 줄만 센다
-                if target and target.group(1) not in own_identifiers:
+                target = re.search(r"(Loading|Unloading) model: (\S+)", line)  # 로드 1번에 여러 줄이 남으므로 이 줄만 센다
+                if not target:
+                    continue
+                action = "load" if target.group(1) == "Loading" else "unload"
+                when = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                if action == "unload" and target.group(2) in own_identifiers:
+                    continue
+                if not _in_ledger(action, target.group(2), when, ledger, tolerance_s):
                     found.append(f"{f.name}: {line[:160]}")
     return found
 
@@ -268,7 +306,9 @@ def exclusive_problems(exclusive: dict, before: list[dict], now: datetime | None
     out = []
     if exclusive.get("require_empty") and before:
         out.append(f"로드 목록이 비어 있지 않다: {_identifiers(before)}")
-    activity = recent_server_activity(exclusive.get("quiet_minutes", 30), exclusive.get("own_identifiers", ()), now)
+    activity = recent_server_activity(exclusive.get("quiet_minutes", 30), exclusive.get("own_identifiers", ()), now,
+                                      ledger=read_ledger(exclusive.get("ledger_path")),
+                                      tolerance_s=exclusive.get("ledger_tolerance_s", 10))
     if activity:
         out.append(f"최근 {exclusive.get('quiet_minutes', 30)}분 서버 로그에 다른 활동 {len(activity)}건 "
                    f"(마지막: {activity[-1]})")
@@ -315,12 +355,13 @@ def _raise_terminated(signum, frame):
 
 
 @contextmanager
-def smoke_model(lm_cfg: dict, guard: dict, on_close=None, exclusive: dict | None = None):
+def smoke_model(lm_cfg: dict, guard: dict, on_close=None, exclusive: dict | None = None, ledger=None):
     """스모크용 모델을 올리고 끝나면 (성공·실패·중단 모두) 내린다. session dict를 넘긴다.
 
     on_close(session): 종료 처리가 끝난 뒤 부른다 (실행 기록 디렉토리에 세션 기록을 남기는 용도).
     exclusive: 시간 분할 사용 조건 (environment.md 1-1, qwen/qwen3-8b). 있으면 로드 목록이 비어 있고 최근 서버 활동이
       없을 때만 진행하고, 같은 모델 키가 이미 로드돼 있어도 재사용하지 않고 멈춘다
+    ledger: 우리 로드·언로드 원장 경로. 있으면 명령 직전에 시각·identifier·명령을 남긴다
     """
     ident, key = lm_cfg["identifier"], lm_cfg["model_key"]
     before = loaded_models()
@@ -372,6 +413,9 @@ def smoke_model(lm_cfg: dict, guard: dict, on_close=None, exclusive: dict | None
                 args += ["--parallel", str(lm_cfg["parallel"])]
             session["loaded_by_us"] = True  # load가 도중에 실패해도 finally에서 확인하고 내린다
             note("lms " + " ".join(args))
+            if ledger:
+                append_ledger(ledger, {"action": "load", "identifier": ident, "model_key": key,
+                                       "command": "lms " + " ".join(args) + " -y"})
             session["load_output"] = lms(*args, "-y").strip()
             after_load = loaded_models()
             mine = [m for m in after_load if _present(ident, [m])]
@@ -401,6 +445,9 @@ def smoke_model(lm_cfg: dict, guard: dict, on_close=None, exclusive: dict | None
                 # 목록 검색 결과와 상관없이 우리 identifier에는 항상 언로드를 보낸다 (필드 이름 차이로 놓치지 않게)
                 was_present = _present(ident, loaded_models())
                 note(f"lms unload {ident}" + ("" if was_present else " (목록에서 못 찾았지만 보낸다)"))
+                if ledger:
+                    append_ledger(ledger, {"action": "unload", "identifier": ident, "model_key": key,
+                                           "command": f"lms unload {ident}"})
                 try:
                     lms("unload", ident, timeout=300)
                 except RuntimeError as e:

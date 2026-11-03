@@ -358,3 +358,34 @@ def test_exclusive_session_never_reuses_or_loads_when_conditions_fail(fake, monk
     with lm.smoke_model(qwen, GUARD, exclusive=excl) as s:
         assert s["loaded_by_us"]
     assert f.commands[-1] == ("unload", "r3llm-qwen3-8b") and f.loaded == []
+
+
+def test_ledger_excludes_only_our_matching_loads_and_unloads(tmp_path, monkeypatch):
+    from datetime import datetime
+    monkeypatch.setattr(lm, "SERVER_LOGS", tmp_path / "logs")
+    _log(tmp_path / "logs", [
+        "[2026-11-03 11:42:05][INFO][LMSAuthenticator][Client=lms-cli][Endpoint=loadModel] Loading model: qwen/qwen3-8b",
+        "[2026-11-03 11:44:38][INFO][LMSAuthenticator][Client=lms-cli][Endpoint=unloadModel] Unloading model: r3llm-qwen3-8b",
+        "[2026-11-03 11:50:00][INFO][LMSAuthenticator][Client=lms-cli][Endpoint=loadModel] Loading model: qwen/qwen3-8b",
+    ])
+    ledger = tmp_path / "ledger.jsonl"
+    lm.append_ledger(ledger, {"action": "load", "identifier": "r3llm-qwen3-8b", "model_key": "qwen/qwen3-8b"})
+    entries = lm.read_ledger(ledger)
+    entries[0]["at"] = "2026-11-03T11:41:57"  # 서버 로그보다 8초 앞 (±10초 안)
+    now = datetime(2026, 11, 3, 12, 0)
+    found = lm.recent_server_activity(30, ("r3llm-qwen3-8b",), now, ledger=entries, tolerance_s=10)
+    assert found == ["2026-11-03.1.log: [2026-11-03 11:50:00][INFO][LMSAuthenticator][Client=lms-cli]"
+                     "[Endpoint=loadModel] Loading model: qwen/qwen3-8b"]  # 원장에 없는 로드만 남는다
+    entries[0]["at"] = "2026-11-03T11:41:50"  # 15초 차이 → 맞지 않음
+    assert len(lm.recent_server_activity(30, ("r3llm-qwen3-8b",), now, ledger=entries, tolerance_s=10)) == 2
+
+
+def test_session_writes_ledger_before_load_and_unload(fake, tmp_path, monkeypatch):
+    f = fake()
+    ledger = tmp_path / "ledger.jsonl"
+    with lm.smoke_model(LM, GUARD, ledger=ledger):
+        pass
+    rows = lm.read_ledger(ledger)
+    assert [(r["action"], r["identifier"]) for r in rows] == [("load", LM["identifier"]), ("unload", LM["identifier"])]
+    assert rows[0]["command"].startswith("lms load mistralai/mistral-7b-instruct-v0.3 --identifier smoke-mistral-7b-v0.3")
+    assert rows[1]["command"] == "lms unload smoke-mistral-7b-v0.3" and "at" in rows[0] and "at_utc" in rows[0]
