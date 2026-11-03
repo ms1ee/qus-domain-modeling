@@ -225,3 +225,47 @@ def test_apply_refuses_to_run_before_response_format_is_decided(monkeypatch, tmp
     monkeypatch.setattr(RL, "load_config", lambda: {**CFG, "apply": {"response_format": None}})
     with pytest.raises(ValueError, match="response_format"):
         RL.apply_runs([], load_rules(), {}, tmp_path)
+
+
+def test_apply_runs_end_to_end_with_fake_session(monkeypatch, tmp_path):
+    """적용 루프 전체 (LM Studio 없이): 호출 기록, 입력별 캐시 재사용, result.json, 재실행 멱등."""
+    from contextlib import contextmanager
+
+    runs = sorted((ROOT / "runs" / "smoke" / "mistral-7b-local" / "school" / "unambiguous@50").glob("rep[12].json"))
+    if len(runs) < 2:
+        pytest.skip("스모크 실행 기록 없음")
+    records = [(p, json.loads(p.read_text())) for p in runs]
+
+    class Judge:
+        calls = 0
+
+        def chat(self, messages, response_format=None):
+            Judge.calls += 1
+            assert response_format and response_format["type"] == "json_schema"
+            pairs = json.loads(messages[1]["content"].split("\n", 1)[1])
+            out = [{"a": p["a"], "b": p["b"], "decision": "same" if {p["a"].lower(), p["b"].lower()} ==
+                    {"roster", "timetable"} else "different", "reason": "r"} for p in pairs]
+            text = json.dumps({"pairs": out})
+            return LLMResponse(text=text, model="m", stop_reason="stop", input_tokens=10, output_tokens=5,
+                               raw=_raw(text), elapsed_s=0.1, request={"model": "m"})
+
+    @contextmanager
+    def fake_session(cfg, guard, log_dir):
+        yield {"identifier": "r3llm-qwen3-8b", "runtime": {}}, Judge()
+
+    monkeypatch.setattr(RL, "judge_session", fake_session)
+    monkeypatch.setattr(RL, "load_config", lambda: {**CFG, "apply": {"response_format": True}})
+    plan = RL.plan_calls(RL.run_inputs(records, load_rules()), CFG)
+    results = RL.apply_runs(records, load_rules(), {}, tmp_path)
+    assert Judge.calls == sum(len(it["batches"]) for it in plan)
+    r1, r2 = results
+    assert r1["n_reused"] == 0 and r2["n_reused"] == plan[1]["reused"] and r2["n_new"] + r2["n_reused"] == r2["n_pairs"]
+    assert sum(p["reused"] for p in r2["pairs"]) == r2["n_reused"]
+    saved = json.loads((tmp_path / "mistral-7b-local/school/unambiguous@50/rep2/result.json").read_text())
+    assert saved["n_pairs"] == r2["n_pairs"] and saved["response_format"] is True
+    for r in results:
+        merged = {frozenset((x["key"], class_key(x["merged_into"]))) for x in r["removed"]}
+        assert merged <= {frozenset(("roster", "timetable"))}
+    before = Judge.calls
+    again = RL.apply_runs(records, load_rules(), {}, tmp_path)  # 기록이 있으면 다시 묻지 않는다
+    assert Judge.calls == before and [r["kept"] for r in again] == [r["kept"] for r in results]
