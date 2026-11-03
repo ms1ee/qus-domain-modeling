@@ -23,6 +23,8 @@ def main() -> None:
     val.add_argument("--conditions", nargs="+", default=None, help="기본: 설정의 조건 전부 (a b)")
     app = sub.add_parser("r3llm-apply", help="R3-LLM 103건 적용 (DRAFT, 입력별 캐시). 실행은 Jay 지시 후")
     app.add_argument("--dry-run", action="store_true", help="호출 없이 적용 계획(캐시 전후 호출 수·시간)과 메모리 검사만 출력")
+    sc = sub.add_parser("r3llm-score", help="R3-LLM 103건 적용 채점 (정제 전 / R1+R2 / R1+R2+R3-LLM) → results/r3llm_apply_<세트>")
+    sc.add_argument("--partial", action="store_true", help="적용이 끝난 실행만 채점 (진행 중 확인용)")
     args = parser.parse_args()
 
     from .config import use_config
@@ -91,6 +93,10 @@ def main() -> None:
             paths = sorted(root.glob("*/*/*/rep*.json"))
             apply_runs([(p, json.loads(p.read_text(encoding="utf-8"))) for p in paths], load_rules(),
                        exp["memory_guard"], root / "r3llm")
+    elif args.command == "r3llm-score":
+        from .r3llm_eval import evaluate as r3llm_score
+
+        r3llm_score(args.partial)
 
 
 if __name__ == "__main__":

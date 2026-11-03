@@ -68,20 +68,25 @@ def label_removed(original: list[str], result: dict, m: Matcher) -> list[dict]:
 
 
 def score_run(record: dict, nodes: list[dict], variant: dict, rules: dict, wn, gold: dict, fixes: dict) -> dict:
+    result = refine(nodes, variant["combo"], rules, wn, variant["overrides"])
+    return score_refined(record, nodes, result, variant["name"], gold, fixes)
+
+
+def score_refined(record: dict, nodes: list[dict], result: dict, variant_name: str, gold: dict, fixes: dict) -> dict:
+    """정제 결과(kept, removed[name, order, rule…]) 하나를 채점한다. 정제 방법과 상관없이 같은 지표를 낸다."""
     m = Matcher(record["set"], gold[record["set"]], fixes,
                 synonyms=(record.get("input_info") or {}).get("synonym_map"))
     original = record["classes"] or []
-    result = refine(nodes, variant["combo"], rules, wn, variant["overrides"])
     before, after = score_classes(original, m), score_classes(result["kept"], m)
     removed = label_removed(original, result, m)
     n = Counter(x["label"] for x in removed)
     # 분류 수와 채점 차이가 맞는지 확인 (정제는 이름을 지우기만 한다)
     if before["tp"] - after["tp"] != n["tp"] or before["fp"] - after["fp"] != n["fp"] + n["dup"]:
-        raise AssertionError(f"{record['input']} rep{record['rep']} {variant['name']}: 지운 이름 분류와 채점 차이가 다르다")
+        raise AssertionError(f"{record['input']} rep{record['rep']} {variant_name}: 지운 이름 분류와 채점 차이가 다르다")
     by_name = {nd["name"]: nd for nd in nodes}
     role_only_fp = [c for c in after["false_positives"] if positions(by_name[c]) == {"role"}]
     role_any_fp = [c for c in after["false_positives"] if "role" in positions(by_name[c])]
-    return {"input": record["input"], "rep": record["rep"], "variant": variant["name"],
+    return {"input": record["input"], "rep": record["rep"], "variant": variant_name,
             "n_before": len(original), "n_after": len(result["kept"]),
             **{k: after[k] for k in ("tp", "fp", "dup", "collapsed", *METRICS)},
             "role_only_fp": len(role_only_fp), "role_only_fp_names": role_only_fp,
