@@ -16,9 +16,9 @@ def gold_path() -> Path:
     return BENCHMARK_DIR / "gold" / experiment_config().get("gold_file", "gold.json")
 
 
-def read_story_file(path) -> list[Story]:
-    # camperplus.txt는 UTF-8 BOM으로 시작한다
-    lines = Path(path).read_text(encoding="utf-8-sig").splitlines()
+def read_story_file(path, encoding: str = "utf-8-sig") -> list[Story]:
+    # camperplus.txt는 UTF-8 BOM으로 시작한다. Zenodo planningpoker.txt는 cp1252다 (0x92 6개)
+    lines = Path(path).read_text(encoding=encoding).splitlines()
     return [Story(i, line.strip()) for i, line in enumerate(lines, start=1) if line.strip()]
 
 
