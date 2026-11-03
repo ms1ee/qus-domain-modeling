@@ -16,6 +16,7 @@ def main() -> None:
     run.add_argument("--dry-run", action="store_true", help="호출 없이 남은 실행만 출력")
     sub.add_parser("score", help="runs/<run_name>의 기록을 채점해서 results/<scores_file> 생성")
     sub.add_parser("summarize", help="스모크 결과 요약 (평균 F1, Δ, SD, 실패 포함/제외, 주입 단어 추출 수)")
+    sub.add_parser("refine-kg", help="KG 정제 예비 실험 (DRAFT): 출처 그래프 → graphs/, 정제 전후 비교 → results/kg_refine_<세트>")
     args = parser.parse_args()
 
     from .config import use_config
@@ -49,6 +50,10 @@ def main() -> None:
         from .summary import summarize
 
         summarize()
+    elif args.command == "refine-kg":
+        from .refine_eval import evaluate
+
+        evaluate()
 
 
 if __name__ == "__main__":
