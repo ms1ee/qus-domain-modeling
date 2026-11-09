@@ -423,7 +423,7 @@ def apply_runs(records_with_paths, rules: dict, guard: dict, out_root: Path, inp
 # --------------------------------------------------------------------------- LM Studio 세션
 
 SESSION_KEYS = ("identifier", "model_key", "loaded_by_us", "load_options", "instance", "runtime", "model_file",
-                "memory_before_load", "memory_after_load", "swap_baseline_gib", "started_at")
+                "memory_before_load", "memory_after_load", "swap_baseline_gib", "started_at", "power_before_load")
 
 
 def session_meta(session: dict) -> dict:

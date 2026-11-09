@@ -389,3 +389,11 @@ def test_session_writes_ledger_before_load_and_unload(fake, tmp_path, monkeypatc
     assert [(r["action"], r["identifier"]) for r in rows] == [("load", LM["identifier"]), ("unload", LM["identifier"])]
     assert rows[0]["command"].startswith("lms load mistralai/mistral-7b-instruct-v0.3 --identifier smoke-mistral-7b-v0.3")
     assert rows[1]["command"] == "lms unload smoke-mistral-7b-v0.3" and "at" in rows[0] and "at_utc" in rows[0]
+
+
+def test_parse_power():
+    batt = "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1)\t95%; discharging; 14:09 remaining present: true"
+    p = lm.parse_power(batt, " lowpowermode         1\n powermode            1\n")
+    assert (p["source"], p["charge_pct"], p["powermode"]) == ("Battery Power", 95, 1)
+    ac = lm.parse_power("Now drawing from 'AC Power'\n -InternalBattery-0 (id=1)\t100%; charged; 0:00 remaining", " powermode 0\n")
+    assert (ac["source"], ac["charge_pct"], ac["powermode"]) == ("AC Power", 100, 0)

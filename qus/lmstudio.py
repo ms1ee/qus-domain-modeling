@@ -81,6 +81,24 @@ def _present(ident: str, models: list[dict]) -> bool:
     return any(_entry_id(m) == ident or f'"{ident}"' in json.dumps(m) for m in models)
 
 
+def parse_power(batt: str, settings: str) -> dict:
+    """`pmset -g batt`, `pmset -g` 출력 → 전원 종류, 충전량, 전원 모드 (macOS powermode: 0 자동, 1 저전력, 2 고성능)."""
+    src = re.search(r"drawing from '([^']+)'", batt)
+    pct = re.search(r"(\d+)%", batt)
+    mode = re.search(r"^\s*powermode\s+(\d+)", settings, re.M)
+    return {"source": src.group(1) if src else None, "charge_pct": int(pct.group(1)) if pct else None,
+            "powermode": int(mode.group(1)) if mode else None, "batt_raw": batt.strip()}
+
+
+def power_info() -> dict:
+    """실행 시점의 전원 상태 (읽기만, 설정은 바꾸지 않는다). 실패해도 예외를 내지 않는다."""
+    try:
+        run = lambda *cmd: subprocess.run(list(cmd), capture_output=True, text=True, timeout=10).stdout  # noqa: E731
+        return {"taken_at": _now(), **parse_power(run("pmset", "-g", "batt"), run("pmset", "-g"))}
+    except Exception as e:  # 기록용이므로 실패해도 실행은 계속한다
+        return {"taken_at": _now(), "error": f"{type(e).__name__}: {e}"}
+
+
 def runtime_info() -> dict:
     """선택된 엔진 목록 원문과 GGUF 엔진 이름, 앱 버전 (기록용)."""
     text = lms("runtime", "ls", timeout=60)
@@ -373,7 +391,8 @@ def smoke_model(lm_cfg: dict, guard: dict, on_close=None, exclusive: dict | None
     session = {"started_at": _now(), "model_key": key, "identifier": ident, "loaded_by_us": False,
                "load_options": {k: lm_cfg[k] for k in ("context_length", "ttl", "parallel") if k in lm_cfg},
                "before_loaded": before,
-               "runtime": runtime_info(), "memory_before_load": memory_snapshot(), "events": []}
+               "runtime": runtime_info(), "memory_before_load": memory_snapshot(), "power_before_load": power_info(),
+               "events": []}
     session["swap_baseline_gib"] = session["memory_before_load"]["swap_used_gib"]  # 실행 중 스왑 증가의 기준
 
     def note(msg: str) -> None:
@@ -454,6 +473,7 @@ def smoke_model(lm_cfg: dict, guard: dict, on_close=None, exclusive: dict | None
                     note(f"언로드 명령 결과: {e}")
             after = loaded_models()
             session.update(after_loaded=after, finished_at=_now(), memory_after_unload=memory_snapshot(),
+                           power_after_unload=power_info(),
                            restored=_identifiers(after) == _identifiers(before) and not _present(ident, after))
             note(f"실행 전 로드 목록 {_identifiers(before)} / 지금 {_identifiers(after)} → "
                  + ("원래 상태와 같다" if session["restored"] else "원래 상태와 다르다 — 확인 필요"))
