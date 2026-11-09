@@ -428,6 +428,8 @@ def test_identify_engine_takes_only_the_one_new_engine_process():
     assert eng["pid"] == 20 and eng["existing_before_load"] == [10]
     assert eng["new_after_load"][0]["parent_command"].startswith("/Users/x/.lmstudio/.internal/utils/node")
     assert "backend-manifest.json" in eng["method"]
+    keyed = lm.identify_engine(before, before + [_proc(40, ENGINE + " --port 1 --api-key s3cr-et_X --jinja")], exe)
+    assert keyed["new_after_load"][0]["command"] == ENGINE + " --port 1 --api-key <redacted> --jinja"  # 비밀 값은 남기지 않는다
     two = lm.identify_engine(before, before + [new, _proc(30, ENGINE)], exe)
     assert two["pid"] is None and len(two["new_after_load"]) == 2  # 둘 이상이면 정하지 않는다
     assert lm.identify_engine(before, before + [new], None)["pid"] is None

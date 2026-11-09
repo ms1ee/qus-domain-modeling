@@ -239,14 +239,26 @@ def list_processes() -> list[dict]:
     return procs
 
 
+_SECRET_ARGS = re.compile(r"(--api-key[ =])\S+")
+
+
+def redact_command(command: str) -> str:
+    """명령줄의 비밀 값(엔진 --api-key)을 가린다. 기록에는 가린 명령만 남긴다."""
+    return _SECRET_ARGS.sub(r"\1<redacted>", command)
+
+
 def identify_engine(before: list[dict], after: list[dict], exe: Path | None) -> dict:
-    """로드 전후 프로세스 목록 → 엔진 프로세스 (ENGINE_ID_METHOD). 못 정하면 pid는 None, 후보는 그대로 남긴다."""
+    """로드 전후 프로세스 목록 → 엔진 프로세스 (ENGINE_ID_METHOD). 못 정하면 pid는 None, 후보는 그대로 남긴다.
+
+    LM Studio는 엔진을 --api-key <값>과 함께 띄운다. 기록에는 그 값을 가린 명령줄만 남긴다
+    """
     def is_engine(p):
         return exe is not None and (p["command"] == str(exe) or p["command"].startswith(str(exe) + " "))
     old = {p["pid"] for p in before}
     by_pid = {p["pid"]: p for p in after}
     new = [p for p in after if is_engine(p) and p["pid"] not in old]
-    found = [{**p, "parent_command": by_pid.get(p["ppid"], {}).get("command", "")[:200]} for p in new]
+    found = [{**p, "command": redact_command(p["command"]),
+              "parent_command": redact_command(by_pid.get(p["ppid"], {}).get("command", ""))[:200]} for p in new]
     return {"method": ENGINE_ID_METHOD, "executable": str(exe) if exe else None,
             "existing_before_load": [p["pid"] for p in before if is_engine(p)],
             "new_after_load": found, "pid": found[0]["pid"] if len(found) == 1 else None}
