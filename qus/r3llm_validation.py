@@ -268,15 +268,20 @@ def apply_plan_report(cfg: dict, exp: dict, inputs=None) -> list[str]:
     L += ["", "| 입력 | 실행 | 후보 쌍 | 새로 묻는 쌍 (캐시) | 호출 (캐시 없음) | 호출 (캐시) |", "|---|---|---|---|---|---|"]
     L += [f"| {k} | {v[0]} | {v[1]:,} | {v[2]:,} | {v[3]} | {v[4]} |" for k, v in sorted(per_input.items())]
     # 남은 호출: result.json이 없는 실행의 묶음 중 call 기록이 아직 없는 것 (실패 기록 .failed-*는 기록으로 치지 않는다)
-    left = []
+    left, retry_wait = [], 0
     for it in cached:
         r = it["record"]
         base = done_root / r["model_name"] / r["set"] / r["input"] / f"rep{r['rep']}"
         if not (base / "result.json").exists():
             left += [b for j, b in enumerate(it["batches"], start=1) if not (base / f"call{j:02d}.json").exists()]
+        elif not (base / "retry01.json").exists():
+            done = json.loads((base / "result.json").read_text(encoding="utf-8"))
+            retry_wait += sum(x["decision"] is None and not x["reused"] for x in done["pairs"])
     per = cfg["apply"].get("calls_per_session")
     _, _, secs = _tokens_and_time(left, cfg)
     L += ["", f"- 남은 호출 (call 기록이 없는 것): {len(left)}회, 추정 시간 {secs / 3600:.2f} h",
+          f"- 응답 누락 재질문 대기 (기존 result.json에서 그 실행이 물었고 판단이 없는 쌍): {retry_wait}쌍. "
+          "새로 묻는 실행은 누락이 생기면 그 쌍만 한 번 더 묻는다",
           f"- 세션 나누기 apply.calls_per_session: {per} → 세션 "
           f"{math.ceil(len(left) / per) if per else (1 if left else 0)}번 (세션마다 로드 전 검사·원장·스왑 기준점 재설정, 끝나면 언로드)",
           *([f"- 누적 스왑 기준 apply.cumulative_swap: 기준점 {cum['baseline_gib']:.2f} GiB ({cum.get('baseline_at')}) 대비 "

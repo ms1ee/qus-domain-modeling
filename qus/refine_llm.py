@@ -369,11 +369,71 @@ def apply_merges(item: dict, decisions: dict[str, str | None]) -> dict:
             "same_pairs": sorted(sorted(s) for s in same)}
 
 
+def _cache_entry(rec: dict, i: int, rep: int, call: str) -> dict:
+    d = rec["parse"]["decisions"].get(str(i)) or rec["parse"]["decisions"].get(i) or {}
+    return {"decision": d.get("decision"), "reason": d.get("reason"), "rep": rep, "call": call}
+
+
+def retry_missing(item: dict, base: Path, cache: dict, sessions, cfg: dict, use_schema: bool, out_root: Path) -> dict | None:
+    """응답 누락 쌍만 한 번 더 묻는다 (2026-11-09 Jay. CLAUDE.md 재시도 최대 1회, 재시도 사실을 기록한다).
+
+    대상: 이 실행에서 처음 물었고(캐시의 rep가 이 실행) 판단이 None인 쌍. 묶음 크기 규칙은 본 호출과 같다.
+    기록: base/retry<j>.json (context.kind = apply_retry_missing, 쌍마다 원래 호출 기록). 기록이 있으면 다시 묻지 않으므로
+    같은 쌍을 두 번 넘게 묻지 않는다. 재질문에서도 빠진 쌍은 None으로 남는다
+    """
+    r = item["record"]
+    todo, seen = [], set()
+    for p in item["pairs"]:
+        k = pair_key(p)
+        e = cache.get((r["input"], k))
+        if e and e["decision"] is None and e["rep"] == r["rep"] and k not in seen:
+            todo.append(p)
+            seen.add(k)
+    if not todo:
+        return None
+    batches = pack(todo, cfg, apply_limit(cfg))
+    info = {"pairs": len(todo), "calls": [], "recovered": 0}
+    for j, b in enumerate(batches, start=1):
+        path = base / f"retry{j:02d}.json"
+        client = None if path.exists() else sessions.client()
+        retry_of = [cache[(r["input"], pair_key(p))]["call"] for p in b]
+        rec = run_batch(client, b, cfg, path, use_schema, True,
+                        context={"kind": "apply_retry_missing", "input": r["input"], "rep": r["rep"], "call": j,
+                                 "calls": len(batches), "retry_of": retry_of, "session": sessions.meta,
+                                 "session_number": sessions.number, "call_in_session": sessions.calls})
+        for i, (p, old_call) in enumerate(zip(b, retry_of)):
+            entry = {**_cache_entry(rec, i, r["rep"], str(path.relative_to(out_root))), "retry_of": old_call}
+            cache[(r["input"], pair_key(p))] = entry
+            info["recovered"] += entry["decision"] is not None
+        info["calls"].append(str(path.relative_to(out_root)))
+    return info
+
+
+def _rebuild_if_changed(done: dict, item: dict, cache: dict, info: dict | None, base: Path) -> dict:
+    """기존 result.json의 쌍 판단이 캐시(재질문 반영)와 다르면 판단·병합을 다시 계산해 쓴다. 이전 파일은 옆에 남긴다."""
+    inp = item["record"]["input"]
+    fields = ("decision", "reason", "rep", "call")
+    changed = [x for x in done["pairs"] if any(cache[(inp, x["key"])].get(f) != x.get(f) for f in fields)]
+    if not changed:
+        return done
+    before = base / "result.before-retry.json"
+    if not before.exists():
+        _write_json(before, done)
+    pairs = [{**x, **{f: cache[(inp, x["key"])][f] for f in fields},
+              **({"retry_of": cache[(inp, x["key"])]["retry_of"]} if "retry_of" in cache[(inp, x["key"])] else {})}
+             for x in done["pairs"]]
+    rebuilt = {**done, "pairs": pairs, "retry": info or done.get("retry"), "rebuilt_at": _now(),
+               "rebuilt_reason": f"응답 누락 재질문 반영 (쌍 {len(changed)}개 갱신, 이전 파일 {before.name})",
+               **apply_merges(item, {x["key"]: x["decision"] for x in pairs})}
+    _write_json(base / "result.json", rebuilt)
+    return rebuilt
+
+
 def apply_runs(records_with_paths, rules: dict, guard: dict, out_root: Path, inputs=None) -> list[dict]:
     """103건 적용: 입력별 캐시로 처음 나온 판단 입력만 묻고, 실행마다 result.json(쌍별 판단·재사용 여부·병합)을 남긴다.
 
     기록: out_root/<모델>/<세트>/<입력>/rep<k>/call<j>.json, result.json. 이미 있는 호출 기록은 다시 묻지 않는다 (멱등).
-    생각이 나오면 멈춘다. 응답 누락 쌍은 캐시에 None으로 남기고 다시 묻지 않는다 (재시도 최대 1회 원칙)
+    생각이 나오면 멈춘다. 응답 누락 쌍은 그 쌍만 한 번 더 묻는다 (retry_missing, 재시도 최대 1회). 그래도 빠지면 None으로 둔다
     inputs: 이 입력만 실행한다 (예: original, unambiguous, unambiguous@50). 캐시는 입력별이라 나눠 돌려도 같다
     result.json이 이미 있는 실행은 다시 묻지 않고 그 판단으로 캐시를 채운다 (묶음 크기가 바뀌기 전 결과도 그대로 쓴다)
     세션은 apply.calls_per_session회 호출마다 언로드하고 다시 로드한다 (SplitSessions)
@@ -396,8 +456,11 @@ def apply_runs(records_with_paths, rules: dict, guard: dict, out_root: Path, inp
                     raise RecordMismatch(f"{base / 'result.json'}: 프롬프트 해시가 지금과 다르다. 멈춘다")
                 for x in done["pairs"]:
                     cache.setdefault((r["input"], x["key"]), {k: x[k] for k in ("decision", "reason", "rep", "call")})
+                # 재질문 처리가 생기기 전 결과: 이 실행에서 물었던 쌍의 누락만 다시 묻고, 바뀐 판단이 있으면 result.json을 다시 쓴다
+                info = retry_missing(item, base, cache, sessions, cfg, use_schema, out_root)
+                done = _rebuild_if_changed(done, item, cache, info, base)
                 results.append(done)
-                print(f"  {r['input']} rep{r['rep']}: 기존 result.json 사용")
+                print(f"  {r['input']} rep{r['rep']}: 기존 result.json 사용" + (" (누락 재질문 반영)" if done.get("rebuilt_at") else ""))
                 continue
             for j, b in enumerate(item["batches"], start=1):
                 path = base / f"call{j:02d}.json"
@@ -407,15 +470,15 @@ def apply_runs(records_with_paths, rules: dict, guard: dict, out_root: Path, inp
                                          "calls": len(item["batches"]), "session": sessions.meta,
                                          "session_number": sessions.number, "call_in_session": sessions.calls})
                 for i, p in enumerate(b):
-                    d = rec["parse"]["decisions"].get(str(i)) or rec["parse"]["decisions"].get(i) or {}
-                    cache[(r["input"], pair_key(p))] = {"decision": d.get("decision"), "reason": d.get("reason"),
-                                                        "rep": r["rep"], "call": str(path.relative_to(out_root))}
+                    cache[(r["input"], pair_key(p))] = _cache_entry(rec, i, r["rep"], str(path.relative_to(out_root)))
+            info = retry_missing(item, base, cache, sessions, cfg, use_schema, out_root)
             decisions = {pair_key(p): cache[(r["input"], pair_key(p))]["decision"] for p in item["pairs"]}
             pairs = [{"a": p.a, "b": p.b, "key": pair_key(p), **cache[(r["input"], pair_key(p))],
                       "reused": cache[(r["input"], pair_key(p))]["rep"] != r["rep"]} for p in item["pairs"]]
             result = {"record": r, "prompt_sha256": prompt_sha256(cfg), "response_format": use_schema,
                       "pairs": pairs, "n_pairs": len(pairs), "n_new": len(item["new_pairs"]),
-                      "n_reused": item["reused"], "calls": len(item["batches"]), **apply_merges(item, decisions)}
+                      "n_reused": item["reused"], "calls": len(item["batches"]), "retry": info,
+                      **apply_merges(item, decisions)}
             _write_json(base / "result.json", result)
             results.append(result)
             print(f"  {r['input']} rep{r['rep']}: 쌍 {len(pairs)} (새로 {len(item['new_pairs'])}, 재사용 {item['reused']}), "

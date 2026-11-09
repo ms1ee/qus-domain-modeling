@@ -415,3 +415,93 @@ def test_split_sessions_stop_before_next_session_when_cumulative_swap_exceeds(mo
             s.client()
     assert events == [("open", 1), ("close", 1, None)]  # 세션 1은 정상 종료(언로드)된 뒤 멈춘다
     assert lmstudio.cumulative_swap_problems({"swap_used_gib": 2.48}, {"baseline_gib": 0.48, "max_increase_gib": 2.0}) == []
+
+
+def _omit_judge(omit_times):
+    """첫 호출의 첫 쌍을 omit_times번 빼고 답하는 대역. asked에 묻은 쌍 수를 남긴다."""
+    state = {"omitted": 0, "asked": [], "target": None}
+
+    class Judge:
+        def chat(self, messages, response_format=None):
+            pairs = json.loads(messages[1]["content"].split("\n", 1)[1])
+            state["asked"].append(len(pairs))
+            if state["target"] is None:
+                state["target"] = (pairs[0]["a"], pairs[0]["b"])
+            out = []
+            for p in pairs:
+                if (p["a"], p["b"]) == state["target"] and state["omitted"] < omit_times:
+                    state["omitted"] += 1
+                    continue
+                out.append({"a": p["a"], "b": p["b"], "decision": "different", "reason": "r"})
+            text = json.dumps({"pairs": out})
+            return LLMResponse(text=text, model="m", stop_reason="stop", input_tokens=10, output_tokens=5,
+                               raw=_raw(text), elapsed_s=0.1, request={"model": "m"})
+    return Judge(), state
+
+
+def _install_judge(monkeypatch, judge):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_session(cfg, guard, log_dir):
+        yield {"identifier": "x", "runtime": {}}, judge
+    monkeypatch.setattr(RL, "judge_session", fake_session)
+    monkeypatch.setattr(RL, "load_config", lambda: {**CFG, "apply": {"response_format": True}})
+
+
+def _u50_records(reps=("rep1",)):
+    base = ROOT / "runs" / "smoke" / "mistral-7b-local" / "school" / "unambiguous@50"
+    paths = [base / f"{r}.json" for r in reps]
+    if not all(p.exists() for p in paths):
+        pytest.skip("스모크 실행 기록 없음")
+    return [(p, json.loads(p.read_text())) for p in paths]
+
+
+def test_missing_pair_is_asked_once_more_and_recorded(monkeypatch, tmp_path):
+    records = _u50_records()
+    judge, st = _omit_judge(1)
+    _install_judge(monkeypatch, judge)
+    plan = RL.plan_calls(RL.run_inputs(records, load_rules()), CFG)
+    n_batches = len(plan[0]["batches"])
+    res = RL.apply_runs(records, load_rules(), {}, tmp_path)[0]
+    assert st["asked"][n_batches:] == [1]  # 본 호출 뒤 빠진 1쌍만 다시 물었다
+    assert res["retry"] == {"pairs": 1, "calls": ["mistral-7b-local/school/unambiguous@50/rep1/retry01.json"], "recovered": 1}
+    entry = next(x for x in res["pairs"] if (x["a"], x["b"]) == st["target"])
+    assert entry["decision"] == "different" and entry["retry_of"].endswith("call01.json")
+    rec = json.loads((tmp_path / res["retry"]["calls"][0]).read_text())
+    assert rec["context"]["kind"] == "apply_retry_missing" and rec["context"]["retry_of"][0].endswith("call01.json")
+    before = len(st["asked"])
+    (tmp_path / "mistral-7b-local/school/unambiguous@50/rep1/result.json").unlink()
+    RL.apply_runs(records, load_rules(), {}, tmp_path)  # 기록이 있으면 다시 묻지 않는다
+    assert len(st["asked"]) == before
+
+
+def test_pair_missing_again_stays_none_and_is_not_asked_a_third_time(monkeypatch, tmp_path):
+    records = _u50_records()
+    judge, st = _omit_judge(2)
+    _install_judge(monkeypatch, judge)
+    res = RL.apply_runs(records, load_rules(), {}, tmp_path)[0]
+    assert res["retry"]["recovered"] == 0
+    assert next(x for x in res["pairs"] if (x["a"], x["b"]) == st["target"])["decision"] is None
+    before = len(st["asked"])
+    again = RL.apply_runs(records, load_rules(), {}, tmp_path)[0]
+    assert len(st["asked"]) == before and again["retry"]["recovered"] == 0  # 재시도는 최대 1회
+
+
+def test_existing_result_with_missing_pair_is_retried_and_rebuilt(monkeypatch, tmp_path):
+    records = _u50_records(("rep1", "rep2"))
+    judge, st = _omit_judge(10 ** 6)  # 재질문 처리가 없던 때처럼: 계속 빠진 채로 result.json을 만든다
+    _install_judge(monkeypatch, judge)
+    monkeypatch.setattr(RL, "retry_missing", lambda *a, **k: None)
+    first = RL.apply_runs(records, load_rules(), {}, tmp_path)
+    key = next(x["key"] for x in first[0]["pairs"] if (x["a"], x["b"]) == st["target"])
+    reused_later = any(x["key"] == key for x in first[1]["pairs"])
+    monkeypatch.undo()
+    judge2, st2 = _omit_judge(0)
+    _install_judge(monkeypatch, judge2)
+    out = RL.apply_runs(records, load_rules(), {}, tmp_path)
+    assert st2["asked"] == [1]  # 기존 결과의 누락 1쌍만 묻는다
+    assert next(x for x in out[0]["pairs"] if x["key"] == key)["decision"] == "different"
+    assert out[0]["rebuilt_at"] and (tmp_path / "mistral-7b-local/school/unambiguous@50/rep1/result.before-retry.json").exists()
+    if reused_later:  # 그 판단을 재사용한 뒤 실행도 갱신된다
+        assert next(x for x in out[1]["pairs"] if x["key"] == key)["decision"] == "different"

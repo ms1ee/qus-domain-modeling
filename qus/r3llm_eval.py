@@ -63,7 +63,16 @@ def call_stats(exp) -> dict:
             "prompt_tokens": sum(r["response"]["input_tokens"] or 0 for r in recs),
             "output_tokens": sum(r["response"]["output_tokens"] or 0 for r in recs),
             "elapsed_s": sum(r["response"]["elapsed_s"] or 0 for r in recs),
-            "failed_attempts": len(list(_r3_dir(exp).glob("*/*/*/rep*/call*.failed-*.json")))}
+            "failed_attempts": len(list(_r3_dir(exp).glob("*/*/*/rep*/call*.failed-*.json"))),
+            **retry_stats(exp)}
+
+
+def retry_stats(exp) -> dict:
+    """응답 누락 재질문 기록(retry*.json): 호출 수, 다시 물은 쌍, 판단을 받은 쌍."""
+    recs = [json.loads(f.read_text(encoding="utf-8")) for f in sorted(_r3_dir(exp).glob("*/*/*/rep*/retry*.json"))
+            if ".failed-" not in f.name]
+    return {"retry_calls": len(recs), "retry_pairs": sum(len(r["batch"]) for r in recs),
+            "retry_recovered": sum(len(r["batch"]) - len(r["parse"]["missing"]) for r in recs)}
 
 
 def evaluate(partial: bool = False) -> dict:
@@ -194,6 +203,8 @@ def markdown(out: dict) -> list[str]:
           f"- 판단 분포 (새로 물은 쌍): " + ", ".join(f"{k} {v}" for k, v in sorted(cs["decisions"].items())),
           f"- 파싱 실패 호출 {cs['parse_failed_calls']}, 응답 누락 쌍 {cs['missing_pairs']}, 형식이 틀린 항목 {cs['invalid_entries']}, "
           f"요청에 없던 항목 {cs['extra_entries']}, 출력 절단 호출 {cs['truncated_calls']}, 실패한 호출 시도 {cs['failed_attempts']}",
+          f"- 응답 누락 재질문: 호출 {cs.get('retry_calls', 0)}회, 다시 물은 쌍 {cs.get('retry_pairs', 0)}, "
+          f"판단을 받은 쌍 {cs.get('retry_recovered', 0)}",
           f"- 생각 흔적 호출 {cs['thinking_calls']} (본문 <think> {cs['think_tag_calls']}, reasoning_content 최대 {cs['reasoning_content_chars_max']}자)",
           f"- 토큰 합 프롬프트 {cs['prompt_tokens']:,} / 출력 {cs['output_tokens']:,}, 호출 시간 합 {cs['elapsed_s'] / 3600:.2f} h"]
     return L
