@@ -173,6 +173,18 @@ def problems_while_running(mem: dict, guard: dict, swap_baseline_gib: float) -> 
     return out
 
 
+def cumulative_swap_problems(mem: dict, cumulative: dict) -> list[str]:
+    """세션 사이 멈춤 조건 (2026-11-09 Jay): 정해 둔 기준점 대비 스왑 누적 증가 > max_increase_gib.
+
+    세션마다 스왑 기준점을 새로 잡으므로, 세션을 거치며 쌓이는 증가는 이 기준으로만 잡는다
+    """
+    grown = mem["swap_used_gib"] - cumulative["baseline_gib"]
+    if grown > cumulative["max_increase_gib"]:
+        return [f"스왑 사용 {mem['swap_used_gib']:.2f} GiB가 기준점 {cumulative['baseline_gib']:.2f} GiB보다 "
+                f"{grown:.2f} GiB 늘었다 (누적 상한 {cumulative['max_increase_gib']})"]
+    return []
+
+
 def preflight(identifier: str, guard: dict, swap_baseline_gib: float, engine_pid: int | None = None):
     """매 호출 직전 확인: identifier가 로드돼 있고, 멈춤 조건(problems_while_running)에 걸리지 않을 것.
 

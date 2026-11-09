@@ -279,6 +279,9 @@ def apply_plan_report(cfg: dict, exp: dict, inputs=None) -> list[str]:
     L += ["", f"- 남은 호출 (call 기록이 없는 것): {len(left)}회, 추정 시간 {secs / 3600:.2f} h",
           f"- 세션 나누기 apply.calls_per_session: {per} → 세션 "
           f"{math.ceil(len(left) / per) if per else (1 if left else 0)}번 (세션마다 로드 전 검사·원장·스왑 기준점 재설정, 끝나면 언로드)",
+          *([f"- 누적 스왑 기준 apply.cumulative_swap: 기준점 {cum['baseline_gib']:.2f} GiB ({cum.get('baseline_at')}) 대비 "
+             f"+{cum['max_increase_gib']} GiB 초과(스왑 사용 > {cum['baseline_gib'] + cum['max_increase_gib']:.2f} GiB)면 "
+             "다음 세션을 시작하지 않는다"] if (cum := cfg["apply"].get("cumulative_swap")) else []),
           f"- 적용 조건 apply.response_format: {cfg['apply']['response_format']} (null이면 실행하지 않는다)", ""]
     return L
 

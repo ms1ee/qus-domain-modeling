@@ -472,6 +472,7 @@ class SplitSessions:
     세션은 실제로 물어야 할 때만 연다 (기록이 이미 있는 호출은 세지 않는다). 세션마다 judge_session이 로드 전
     공존 규칙 검사(원장 기준)·원장 기록·스왑 기준점 재설정을 그대로 한다. 예외가 나면 열린 세션을 그 예외와 함께
     닫는다 (언로드). calls_per_session이 없으면 세션 하나로 끝까지 간다
+    새 세션을 열기 전에 apply.cumulative_swap(기준점 대비 누적 스왑 증가 상한)을 넘었으면 열지 않고 멈춘다
     """
 
     def __init__(self, cfg: dict, guard: dict, log_dir: Path, calls_per_session: int | None):
@@ -490,6 +491,7 @@ class SplitSessions:
         """다음 호출에 쓸 클라이언트. 이번 세션 호출 수가 상한에 닿았으면 언로드하고 새로 로드한다."""
         if self._inner is None or (self.limit and self.calls >= self.limit):
             self.close()
+            self._check_cumulative_swap()
             self._inner = self._stack.enter_context(ExitStack())
             session, self._client = self._inner.enter_context(judge_session(self.cfg, self.guard, self.log_dir))
             self.meta, self.calls = session_meta(session), 0
@@ -497,6 +499,20 @@ class SplitSessions:
             print(f"  [세션 {self.number}] 호출 최대 {self.limit or '제한 없음'}회")
         self.calls += 1
         return self._client
+
+    def _check_cumulative_swap(self) -> None:
+        from . import lmstudio
+
+        cum = self.cfg["apply"].get("cumulative_swap")
+        if not cum:
+            return
+        mem = lmstudio.memory_snapshot()
+        problems = lmstudio.cumulative_swap_problems(mem, cum)
+        if problems:
+            raise lmstudio.MemoryPressure("누적 스왑 기준 초과: " + "; ".join(problems)
+                                          + ". 다음 세션을 시작하지 않고 멈춘다", mem)
+        print(f"  [세션 {self.number + 1} 전] 스왑 {mem['swap_used_gib']:.2f} GiB, 기준점 {cum['baseline_gib']:.2f} 대비 "
+              f"누적 +{mem['swap_used_gib'] - cum['baseline_gib']:.2f} GiB (상한 {cum['max_increase_gib']})")
 
     def close(self) -> None:
         """열린 세션을 정상 종료한다 (언로드·상태 비교·세션 기록)."""

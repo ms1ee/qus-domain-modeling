@@ -333,6 +333,8 @@ def _recording_session(events):
 
 
 def test_split_sessions_reload_every_n_calls_and_close_with_the_error(monkeypatch, tmp_path):
+    from qus import lmstudio
+    monkeypatch.setattr(lmstudio, "memory_snapshot", lambda: {"swap_used_gib": 1.0})
     events = []
     monkeypatch.setattr(RL, "judge_session", _recording_session(events))
     with RL.SplitSessions(CFG, {}, tmp_path, 6) as s:
@@ -396,3 +398,20 @@ def test_apply_runs_splits_sessions_and_skips_loading_when_all_calls_exist(monke
         (tmp_path / "mistral-7b-local/school/unambiguous@50" / r / "result.json").unlink()
     RL.apply_runs(records, load_rules(), {}, tmp_path)
     assert events == []
+
+
+def test_split_sessions_stop_before_next_session_when_cumulative_swap_exceeds(monkeypatch, tmp_path):
+    from qus import lmstudio
+    events = []
+    monkeypatch.setattr(RL, "judge_session", _recording_session(events))
+    swap = {"v": 2.40}
+    monkeypatch.setattr(lmstudio, "memory_snapshot", lambda: {"swap_used_gib": swap["v"]})
+    cfg = {**CFG, "apply": {**CFG["apply"], "cumulative_swap": {"baseline_gib": 0.48, "max_increase_gib": 2.0}}}
+    with pytest.raises(lmstudio.MemoryPressure, match="누적 스왑"):
+        with RL.SplitSessions(cfg, {}, tmp_path, 2) as s:
+            s.client()
+            s.client()
+            swap["v"] = 2.49  # 세션 1 동안 늘었다 → 세션 2를 열지 않는다
+            s.client()
+    assert events == [("open", 1), ("close", 1, None)]  # 세션 1은 정상 종료(언로드)된 뒤 멈춘다
+    assert lmstudio.cumulative_swap_problems({"swap_used_gib": 2.48}, {"baseline_gib": 0.48, "max_increase_gib": 2.0}) == []
