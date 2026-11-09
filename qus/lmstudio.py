@@ -173,15 +173,17 @@ def problems_while_running(mem: dict, guard: dict, swap_baseline_gib: float) -> 
     return out
 
 
-def preflight(identifier: str, guard: dict, swap_baseline_gib: float):
+def preflight(identifier: str, guard: dict, swap_baseline_gib: float, engine_pid: int | None = None):
     """매 호출 직전 확인: identifier가 로드돼 있고, 멈춤 조건(problems_while_running)에 걸리지 않을 것.
 
     멈추지 않는 압박(단계 2·3 등)은 돌려주는 측정값의 warning에 남긴다. 클라이언트가 응답 기록에 붙인다.
+    engine_pid가 있으면 엔진 프로세스 메모리(process_memory)도 측정값의 engine에 남긴다 (읽기만)
     """
     def check() -> dict:
         if not _present(identifier, loaded_models()):
             raise ModelNotLoaded(f"'{identifier}'가 로드돼 있지 않다. JIT 로드를 피하려고 호출하지 않고 멈춘다")
         snap = memory_snapshot()
+        snap["engine"] = process_memory(engine_pid) if engine_pid else None
         problems = problems_while_running(snap, guard, swap_baseline_gib)
         if problems:
             raise MemoryPressure("실행 중 메모리 압박: " + "; ".join(problems), snap)
@@ -192,6 +194,92 @@ def preflight(identifier: str, guard: dict, swap_baseline_gib: float):
                   f"압축 {snap['compressor_gib']:.2f} GiB, 스왑 +{snap['swap_increase_gib']:.2f} GiB")
         return snap
     return check
+
+
+# --------------------------------------------------------------------------- 엔진 프로세스 (원인 확인 기록, 읽기만)
+
+BACKENDS = Path.home() / ".lmstudio" / "extensions" / "backends"  # 읽기만 한다
+ENGINE_ID_METHOD = ("로드 직전·직후 `ps -axo pid,ppid,rss,command`를 비교해, 선택된 GGUF 엔진의 backend-manifest.json "
+                    "engine_protocol_server.executable_relative_path 경로로 시작하는 명령 중 로드 후 새로 생긴 프로세스. "
+                    "정확히 1개일 때만 엔진으로 정한다")
+_TOP_UNITS = {"B": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3}
+
+
+def engine_executable(gguf_engine: str | None) -> Path | None:
+    """`lms runtime ls`의 선택 엔진 이름(예: llama.cpp-…@2.65.1) → 매니페스트가 가리키는 엔진 실행 파일 경로."""
+    if not gguf_engine:
+        return None
+    d = BACKENDS / gguf_engine.replace("@", "-")
+    try:
+        manifest = json.loads((d / "backend-manifest.json").read_text(encoding="utf-8"))
+        return d / manifest["engine_protocol_server"]["executable_relative_path"]
+    except (OSError, KeyError, ValueError):
+        return None
+
+
+def list_processes() -> list[dict]:
+    out = subprocess.run(["ps", "-axo", "pid=,ppid=,rss=,command="], capture_output=True, text=True).stdout
+    procs = []
+    for line in out.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) == 4 and parts[0].isdigit():
+            procs.append({"pid": int(parts[0]), "ppid": int(parts[1]), "rss_kib": int(parts[2]), "command": parts[3]})
+    return procs
+
+
+def identify_engine(before: list[dict], after: list[dict], exe: Path | None) -> dict:
+    """로드 전후 프로세스 목록 → 엔진 프로세스 (ENGINE_ID_METHOD). 못 정하면 pid는 None, 후보는 그대로 남긴다."""
+    def is_engine(p):
+        return exe is not None and (p["command"] == str(exe) or p["command"].startswith(str(exe) + " "))
+    old = {p["pid"] for p in before}
+    by_pid = {p["pid"]: p for p in after}
+    new = [p for p in after if is_engine(p) and p["pid"] not in old]
+    found = [{**p, "parent_command": by_pid.get(p["ppid"], {}).get("command", "")[:200]} for p in new]
+    return {"method": ENGINE_ID_METHOD, "executable": str(exe) if exe else None,
+            "existing_before_load": [p["pid"] for p in before if is_engine(p)],
+            "new_after_load": found, "pid": found[0]["pid"] if len(found) == 1 else None}
+
+
+def _top_bytes(text: str) -> float | None:
+    m = re.fullmatch(r"([\d.]+)([BKMG])[+-]?", text)
+    return float(m.group(1)) * _TOP_UNITS[m.group(2)] if m else None
+
+
+def process_memory(pid: int) -> dict:
+    """한 프로세스의 RSS(ps)와 물리 footprint·압축된 양(top -stats mem,cmprs). 읽기만, 실패해도 예외 없이 error를 남긴다.
+
+    RSS에는 압축된 페이지가 들어가지 않는다. footprint는 압축된 페이지를 포함한다
+    """
+    out = {"pid": pid, "taken_at": _now()}
+    try:
+        rss = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+        out["alive"] = bool(rss)
+        out["rss_gib"] = int(rss) * 1024 / GIB if rss else None
+        if rss:
+            top = subprocess.run(["top", "-l", "1", "-pid", str(pid), "-stats", "pid,mem,cmprs"],
+                                 capture_output=True, text=True, timeout=10).stdout.strip().splitlines()
+            row = top[-1].split() if top else []
+            if len(row) >= 3 and row[0] == str(pid):
+                fp, cm = _top_bytes(row[1]), _top_bytes(row[2])
+                out["footprint_gib"] = fp / GIB if fp is not None else None
+                out["compressed_gib"] = cm / GIB if cm is not None else None
+    except Exception as e:  # noqa: BLE001 — 기록용 측정이 실행을 멈추게 하지 않는다
+        out["error"] = f"{type(e).__name__}: {e}"
+    return out
+
+
+def postflight(engine_pid: int | None = None):
+    """매 호출 직후 기록: 시스템 메모리와 엔진 프로세스 메모리를 먼저 재고, 서버 로그 정보(server_call_info)를 붙인다.
+
+    실패해도 예외를 내지 않는다 (클라이언트 postflight 약속)
+    """
+    def after(response_id: str | None) -> dict:
+        try:
+            mem = {**memory_snapshot(), "engine": process_memory(engine_pid) if engine_pid else None}
+        except Exception as e:  # noqa: BLE001
+            mem = {"error": f"{type(e).__name__}: {e}"}
+        return {**server_call_info(response_id), "memory_after_call": mem}
+    return after
 
 
 SERVER_LOGS = Path.home() / ".lmstudio" / "server-logs"  # 읽기만 한다
@@ -435,7 +523,10 @@ def smoke_model(lm_cfg: dict, guard: dict, on_close=None, exclusive: dict | None
             if ledger:
                 append_ledger(ledger, {"action": "load", "identifier": ident, "model_key": key,
                                        "command": "lms " + " ".join(args) + " -y"})
+            procs_before = list_processes()
             session["load_output"] = lms(*args, "-y").strip()
+            session["engine"] = identify_engine(procs_before, list_processes(),
+                                                engine_executable(session["runtime"].get("gguf_engine")))
             after_load = loaded_models()
             mine = [m for m in after_load if _present(ident, [m])]
             if not mine:
@@ -454,6 +545,15 @@ def smoke_model(lm_cfg: dict, guard: dict, on_close=None, exclusive: dict | None
                  f"스왑 사용 {session['memory_after_load']['swap_used_gib']:.2f} GiB "
                  f"(로드 직전 {session['swap_baseline_gib']:.2f}), "
                  f"압박 단계 {session['memory_after_load']['pressure_level']}")
+            eng = session["engine"]
+            if eng["pid"]:
+                eng["after_load"] = process_memory(eng["pid"])
+                note(f"엔진 프로세스 pid {eng['pid']} ({Path(eng['executable']).name}, 로드 후 새로 생김), "
+                     f"RSS {eng['after_load'].get('rss_gib') or 0:.2f} GiB, "
+                     f"footprint {eng['after_load'].get('footprint_gib') or 0:.2f} GiB")
+            else:
+                note(f"엔진 프로세스를 정하지 못했다 (로드 후 새 후보 {len(eng['new_after_load'])}개). "
+                     "엔진 메모리 기록 없이 진행한다")
         yield session
     except BaseException as e:
         session["error"] = f"{type(e).__name__}: {e}"
@@ -472,6 +572,8 @@ def smoke_model(lm_cfg: dict, guard: dict, on_close=None, exclusive: dict | None
                 except RuntimeError as e:
                     note(f"언로드 명령 결과: {e}")
             after = loaded_models()
+            if (session.get("engine") or {}).get("pid"):
+                session["engine"]["after_unload"] = process_memory(session["engine"]["pid"])  # 사라졌는지 (alive)
             session.update(after_loaded=after, finished_at=_now(), memory_after_unload=memory_snapshot(),
                            power_after_unload=power_info(),
                            restored=_identifiers(after) == _identifiers(before) and not _present(ident, after))

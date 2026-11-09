@@ -312,3 +312,87 @@ def test_apply_runs_inputs_filter_and_reuse_of_existing_results(monkeypatch, tmp
     assert [(r["record"]["input"], r["record"]["rep"]) for r in both] == [("unambiguous@50", 1), ("unambiguous@50", 2)]
     plan = RL.plan_calls(RL.run_inputs(records[:2], load_rules()), CFG)
     assert Judge.calls - n1 == len(plan[1]["batches"]) and both[1]["n_reused"] == plan[1]["reused"]
+
+
+def _recording_session(events):
+    from contextlib import contextmanager
+    n = {"v": 0}
+
+    @contextmanager
+    def fake_session(cfg, guard, log_dir):
+        n["v"] += 1
+        k = n["v"]
+        events.append(("open", k))
+        try:
+            yield {"identifier": "x", "runtime": {}, "started_at": f"s{k}"}, f"client{k}"
+        except BaseException as e:
+            events.append(("close", k, type(e).__name__))
+            raise
+        events.append(("close", k, None))
+    return fake_session
+
+
+def test_split_sessions_reload_every_n_calls_and_close_with_the_error(monkeypatch, tmp_path):
+    events = []
+    monkeypatch.setattr(RL, "judge_session", _recording_session(events))
+    with RL.SplitSessions(CFG, {}, tmp_path, 6) as s:
+        got = [s.client() for _ in range(13)]
+        assert (s.number, s.calls, s.meta["started_at"]) == (3, 1, "s3")
+    assert got == ["client1"] * 6 + ["client2"] * 6 + ["client3"]
+    assert events == [("open", 1), ("close", 1, None), ("open", 2), ("close", 2, None), ("open", 3), ("close", 3, None)]
+    events.clear()
+    monkeypatch.setattr(RL, "judge_session", _recording_session(events))
+    with pytest.raises(RuntimeError):
+        with RL.SplitSessions(CFG, {}, tmp_path, 6) as s:
+            s.client()
+            raise RuntimeError("스왑")
+    assert events == [("open", 1), ("close", 1, "RuntimeError")]  # 멈추면 그 세션을 예외와 함께 닫는다 (언로드)
+    events.clear()
+    monkeypatch.setattr(RL, "judge_session", _recording_session(events))
+    with RL.SplitSessions(CFG, {}, tmp_path, None) as s:
+        [s.client() for _ in range(13)]
+    assert events == [("open", 1), ("close", 1, None)]
+    events.clear()
+    monkeypatch.setattr(RL, "judge_session", _recording_session(events))
+    with RL.SplitSessions(CFG, {}, tmp_path, 6):
+        pass
+    assert events == []  # 묻지 않으면 로드하지 않는다
+
+
+def test_apply_runs_splits_sessions_and_skips_loading_when_all_calls_exist(monkeypatch, tmp_path):
+    import math
+
+    runs = sorted((ROOT / "runs" / "smoke" / "mistral-7b-local" / "school" / "unambiguous@50").glob("rep[12].json"))
+    if len(runs) < 2:
+        pytest.skip("스모크 실행 기록 없음")
+    records = [(p, json.loads(p.read_text())) for p in runs]
+    events = []
+    base = _recording_session(events)
+    from contextlib import contextmanager
+
+    class Judge:
+        def chat(self, messages, response_format=None):
+            pairs = json.loads(messages[1]["content"].split("\n", 1)[1])
+            text = json.dumps({"pairs": [{"a": p["a"], "b": p["b"], "decision": "different", "reason": "r"}
+                                         for p in pairs]})
+            return LLMResponse(text=text, model="m", stop_reason="stop", input_tokens=10, output_tokens=5,
+                               raw=_raw(text), elapsed_s=0.1, request={"model": "m"})
+
+    @contextmanager
+    def fake_session(cfg, guard, log_dir):
+        with base(cfg, guard, log_dir) as (session, _):
+            yield session, Judge()
+
+    monkeypatch.setattr(RL, "judge_session", fake_session)
+    monkeypatch.setattr(RL, "load_config", lambda: {**CFG, "apply": {"response_format": True, "calls_per_session": 2}})
+    plan = RL.plan_calls(RL.run_inputs(records, load_rules()), CFG)
+    calls = sum(len(it["batches"]) for it in plan)
+    RL.apply_runs(records, load_rules(), {}, tmp_path)
+    assert sum(e[0] == "open" for e in events) == math.ceil(calls / 2)
+    first = json.loads((tmp_path / "mistral-7b-local/school/unambiguous@50/rep1/call01.json").read_text())
+    assert (first["context"]["session_number"], first["context"]["call_in_session"]) == (1, 1)
+    events.clear()
+    for r in ("rep1", "rep2"):  # 호출 기록은 남기고 result.json만 치우면, 다시 돌려도 로드하지 않는다
+        (tmp_path / "mistral-7b-local/school/unambiguous@50" / r / "result.json").unlink()
+    RL.apply_runs(records, load_rules(), {}, tmp_path)
+    assert events == []

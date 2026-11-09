@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 import re
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from itertools import combinations
@@ -375,6 +376,7 @@ def apply_runs(records_with_paths, rules: dict, guard: dict, out_root: Path, inp
     생각이 나오면 멈춘다. 응답 누락 쌍은 캐시에 None으로 남기고 다시 묻지 않는다 (재시도 최대 1회 원칙)
     inputs: 이 입력만 실행한다 (예: original, unambiguous, unambiguous@50). 캐시는 입력별이라 나눠 돌려도 같다
     result.json이 이미 있는 실행은 다시 묻지 않고 그 판단으로 캐시를 채운다 (묶음 크기가 바뀌기 전 결과도 그대로 쓴다)
+    세션은 apply.calls_per_session회 호출마다 언로드하고 다시 로드한다 (SplitSessions)
     """
     cfg = load_config()
     use_schema = cfg["apply"]["response_format"]
@@ -384,8 +386,7 @@ def apply_runs(records_with_paths, rules: dict, guard: dict, out_root: Path, inp
         records_with_paths = [(p, r) for p, r in records_with_paths if r["input"] in set(inputs)]
     plan = plan_calls(run_inputs(records_with_paths, rules), cfg)
     cache, results = {}, []
-    with judge_session(cfg, guard, out_root) as (session, client):
-        meta = session_meta(session)
+    with SplitSessions(cfg, guard, out_root, cfg["apply"].get("calls_per_session")) as sessions:
         for item in plan:
             r = item["record"]
             base = out_root / r["model_name"] / r["set"] / r["input"] / f"rep{r['rep']}"
@@ -400,9 +401,11 @@ def apply_runs(records_with_paths, rules: dict, guard: dict, out_root: Path, inp
                 continue
             for j, b in enumerate(item["batches"], start=1):
                 path = base / f"call{j:02d}.json"
+                client = None if path.exists() else sessions.client()  # 기록이 있으면 run_batch가 건너뛴다
                 rec = run_batch(client, b, cfg, path, use_schema, True,
                                 context={"kind": "apply", "input": r["input"], "rep": r["rep"], "call": j,
-                                         "calls": len(item["batches"]), "session": meta})
+                                         "calls": len(item["batches"]), "session": sessions.meta,
+                                         "session_number": sessions.number, "call_in_session": sessions.calls})
                 for i, p in enumerate(b):
                     d = rec["parse"]["decisions"].get(str(i)) or rec["parse"]["decisions"].get(i) or {}
                     cache[(r["input"], pair_key(p))] = {"decision": d.get("decision"), "reason": d.get("reason"),
@@ -423,7 +426,8 @@ def apply_runs(records_with_paths, rules: dict, guard: dict, out_root: Path, inp
 # --------------------------------------------------------------------------- LM Studio 세션
 
 SESSION_KEYS = ("identifier", "model_key", "loaded_by_us", "load_options", "instance", "runtime", "model_file",
-                "memory_before_load", "memory_after_load", "swap_baseline_gib", "started_at", "power_before_load")
+                "memory_before_load", "memory_after_load", "swap_baseline_gib", "started_at", "power_before_load",
+                "engine")
 
 
 def session_meta(session: dict) -> dict:
@@ -453,9 +457,49 @@ def judge_session(cfg: dict, guard: dict, log_dir: Path):
         ledger = ROOT / cfg["model"]["exclusive"]["ledger"]
         exclusive = {**cfg["model"]["exclusive"], "ledger_path": ledger}
         with lmstudio.smoke_model(lm, guard, on_close=on_close, exclusive=exclusive, ledger=ledger) as session:
-            check = lmstudio.preflight(session["identifier"], guard, session["swap_baseline_gib"])
+            pid = (session.get("engine") or {}).get("pid")
+            check = lmstudio.preflight(session["identifier"], guard, session["swap_baseline_gib"], engine_pid=pid)
             model_cfg = {k: v for k, v in cfg["model"].items() if k not in ("name", "exclusive")}
             model_cfg["model"] = session["identifier"]
-            yield session, make_client(model_cfg, preflight=check, postflight=lmstudio.server_call_info)
+            yield session, make_client(model_cfg, preflight=check, postflight=lmstudio.postflight(pid))
 
     return _cm()
+
+
+class SplitSessions:
+    """세션 나누기 (2026-11-09 Jay, DRAFT): 판단 모델을 로드 → 호출 최대 calls_per_session회 → 언로드를 반복한다.
+
+    세션은 실제로 물어야 할 때만 연다 (기록이 이미 있는 호출은 세지 않는다). 세션마다 judge_session이 로드 전
+    공존 규칙 검사(원장 기준)·원장 기록·스왑 기준점 재설정을 그대로 한다. 예외가 나면 열린 세션을 그 예외와 함께
+    닫는다 (언로드). calls_per_session이 없으면 세션 하나로 끝까지 간다
+    """
+
+    def __init__(self, cfg: dict, guard: dict, log_dir: Path, calls_per_session: int | None):
+        self.cfg, self.guard, self.log_dir, self.limit = cfg, guard, log_dir, calls_per_session
+        self._stack, self._inner, self._client = ExitStack(), None, None
+        self.meta, self.number, self.calls = None, 0, 0
+
+    def __enter__(self):
+        self._stack.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._stack.__exit__(*exc)
+
+    def client(self):
+        """다음 호출에 쓸 클라이언트. 이번 세션 호출 수가 상한에 닿았으면 언로드하고 새로 로드한다."""
+        if self._inner is None or (self.limit and self.calls >= self.limit):
+            self.close()
+            self._inner = self._stack.enter_context(ExitStack())
+            session, self._client = self._inner.enter_context(judge_session(self.cfg, self.guard, self.log_dir))
+            self.meta, self.calls = session_meta(session), 0
+            self.number += 1
+            print(f"  [세션 {self.number}] 호출 최대 {self.limit or '제한 없음'}회")
+        self.calls += 1
+        return self._client
+
+    def close(self) -> None:
+        """열린 세션을 정상 종료한다 (언로드·상태 비교·세션 기록)."""
+        if self._inner is not None:
+            self._inner.close()
+            self._inner = None

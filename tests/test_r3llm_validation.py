@@ -56,3 +56,29 @@ def test_validation_set_composition_and_label_free_pairs(smoke):
     assert sum(len(b) for b in batches) == len(vs["items"]) == sum(len(i) for i in ids)
     payload = json.dumps([p.payload() for b in batches for p in b])
     assert "label" not in payload and "주입" not in payload and "WordNet" not in payload
+
+
+def test_engine_memory_report_puts_kv_estimate_next_to_engine_growth(tmp_path):
+    import json as _json
+
+    from qus import refine_llm as RL
+    from qus import r3llm_validation as V
+
+    cfg = RL.load_config()
+    d = tmp_path / "m" / "school" / "original" / "rep1"
+    d.mkdir(parents=True)
+    rec = {"started_at": "2026-11-09T03:00:00", "context": {"input": "original", "rep": 1, "call": 1,
+                                                              "session_number": 1, "call_in_session": 1},
+           "response": {"input_tokens": 1024, "output_tokens": 0,
+                        "preflight": {"compressor_gib": 3.0, "engine": {"rss_gib": 6.0, "footprint_gib": 7.0}},
+                        "server_info": {"memory_after_call": {"compressor_gib": 3.5,
+                                                              "engine": {"rss_gib": 6.25, "footprint_gib": 7.5,
+                                                                         "compressed_gib": 0.1}}}}}
+    (d / "call01.json").write_text(_json.dumps(rec))
+    (d / "call02.failed-x.json").write_text(_json.dumps(rec))  # 실패 기록은 세지 않는다
+    old = {**rec, "response": {**rec["response"], "preflight": {"compressor_gib": 3.0}}}
+    (d / "call03.json").write_text(_json.dumps(old))  # 엔진 기록이 없는 예전 호출도 세지 않는다
+    L = V.engine_memory_report(cfg, tmp_path)
+    assert "호출 1회" in L[0] and "144 KiB" in L[0]
+    row = L[4]
+    assert "| original rep1 call01 | 1,024 | 0 | 0.141 | 0.141 | 6.00 | 6.25 | 0.250 | 7.00 | 7.50 | 0.500 | 0.10 | 3.00 | 3.50 |" in row

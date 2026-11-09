@@ -93,6 +93,7 @@ def fake(monkeypatch):
         monkeypatch.setattr(lm, "loaded_models", lambda: list(f.loaded))
         monkeypatch.setattr(lm, "runtime_info", lambda: {"gguf_engine": "llama.cpp@x"})
         monkeypatch.setattr(lm, "memory_snapshot", lambda: dict(mem or _mem()))
+        monkeypatch.setattr(lm, "list_processes", lambda: [])  # 엔진 식별은 따로 시험한다
 
         def fingerprint(cfg):
             f.commands.append(("sha256",))
@@ -397,3 +398,82 @@ def test_parse_power():
     assert (p["source"], p["charge_pct"], p["powermode"]) == ("Battery Power", 95, 1)
     ac = lm.parse_power("Now drawing from 'AC Power'\n -InternalBattery-0 (id=1)\t100%; charged; 0:00 remaining", " powermode 0\n")
     assert (ac["source"], ac["charge_pct"], ac["powermode"]) == ("AC Power", 100, 0)
+
+
+ENGINE = "/Users/x/.lmstudio/extensions/backends/llama.cpp-mac-arm64-apple-metal-advsimd-2.65.1/llama-server"
+
+
+def _proc(pid, command, ppid=1, rss=100):
+    return {"pid": pid, "ppid": ppid, "rss_kib": rss, "command": command}
+
+
+def test_engine_executable_reads_manifest(tmp_path, monkeypatch):
+    monkeypatch.setattr(lm, "BACKENDS", tmp_path)
+    d = tmp_path / "llama.cpp-mac-arm64-apple-metal-advsimd-2.65.1"
+    d.mkdir()
+    (d / "backend-manifest.json").write_text('{"engine_protocol_server": {"executable_relative_path": "llama-server"}}')
+    assert lm.engine_executable("llama.cpp-mac-arm64-apple-metal-advsimd@2.65.1") == d / "llama-server"
+    assert lm.engine_executable("llama.cpp-mac-arm64-apple-metal-advsimd@9.9.9") is None
+    assert lm.engine_executable(None) is None
+
+
+def test_identify_engine_takes_only_the_one_new_engine_process():
+    from pathlib import Path
+    exe = Path(ENGINE)
+    parent = _proc(7, "/Users/x/.lmstudio/.internal/utils/node -e ...")
+    old_engine = _proc(10, ENGINE + " --port 50001")  # 로드 전부터 있던 엔진 (다른 연구 등)은 후보가 아니다
+    before = [parent, old_engine, _proc(11, "/bin/zsh")]
+    new = _proc(20, ENGINE + " --port 60219", ppid=7)
+    eng = lm.identify_engine(before, before + [new, _proc(21, ENGINE + "-other"), _proc(22, "/usr/bin/top")], exe)
+    assert eng["pid"] == 20 and eng["existing_before_load"] == [10]
+    assert eng["new_after_load"][0]["parent_command"].startswith("/Users/x/.lmstudio/.internal/utils/node")
+    assert "backend-manifest.json" in eng["method"]
+    two = lm.identify_engine(before, before + [new, _proc(30, ENGINE)], exe)
+    assert two["pid"] is None and len(two["new_after_load"]) == 2  # 둘 이상이면 정하지 않는다
+    assert lm.identify_engine(before, before + [new], None)["pid"] is None
+
+
+def test_process_memory_reads_ps_and_top(monkeypatch):
+    import subprocess
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append(cmd[0])
+        out = {"ps": "  1048576\n", "top": "Processes: 1\nPID    MEM   CMPRS\n20     6144M 1.5G+\n"}[cmd[0]]
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+    monkeypatch.setattr(lm.subprocess, "run", run)
+    m = lm.process_memory(20)
+    assert m["alive"] and m["rss_gib"] == 1.0 and m["footprint_gib"] == 6.0 and m["compressed_gib"] == 1.5
+    monkeypatch.setattr(lm.subprocess, "run", lambda cmd, **kw: (seen.append(cmd[0]),
+                                                                 subprocess.CompletedProcess(cmd, 1, "", ""))[1])
+    seen.clear()
+    gone = lm.process_memory(20)
+    assert gone["alive"] is False and gone["rss_gib"] is None and seen == ["ps"]  # 없는 프로세스는 top을 부르지 않는다
+
+
+def test_postflight_measures_memory_before_reading_server_log(monkeypatch):
+    order = []
+    monkeypatch.setattr(lm, "memory_snapshot", lambda: (order.append("mem"), {"compressor_gib": 3.0})[1])
+    monkeypatch.setattr(lm, "process_memory", lambda pid: (order.append("engine"), {"pid": pid, "rss_gib": 1.0})[1])
+    monkeypatch.setattr(lm, "server_call_info", lambda rid: (order.append("log"), {"cache": "없음"})[1])
+    info = lm.postflight(20)("chatcmpl-1")
+    assert order == ["mem", "engine", "log"]
+    assert info["cache"] == "없음" and info["memory_after_call"]["engine"]["pid"] == 20
+    assert lm.postflight(None)("x")["memory_after_call"]["engine"] is None
+
+
+def test_session_identifies_engine_and_measures_it_before_calls_and_after_unload(fake, monkeypatch):
+    from pathlib import Path
+    f = fake()
+    lists = iter([[_proc(7, "node")], [_proc(7, "node"), _proc(20, ENGINE, ppid=7)]])
+    monkeypatch.setattr(lm, "list_processes", lambda: next(lists))
+    monkeypatch.setattr(lm, "engine_executable", lambda name: Path(ENGINE))
+    alive = {"v": True}
+    monkeypatch.setattr(lm, "process_memory", lambda pid: {"pid": pid, "alive": alive["v"], "rss_gib": 5.0})
+    with lm.smoke_model(LM, GUARD) as s:
+        assert s["engine"]["pid"] == 20 and s["engine"]["after_load"]["rss_gib"] == 5.0
+        snap = lm.preflight(LM["identifier"], GUARD, s["swap_baseline_gib"], engine_pid=20)()
+        assert snap["engine"]["pid"] == 20
+        alive["v"] = False
+    assert s["engine"]["after_unload"]["alive"] is False
+    assert any("엔진 프로세스 pid 20" in e["msg"] for e in s["events"])

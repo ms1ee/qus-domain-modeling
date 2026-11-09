@@ -12,6 +12,7 @@
 파싱 성공률(호출 단위), 응답 누락(쌍 단위), 생각 흔적(reasoning_content 길이, <think> 유무)
 """
 import json
+import math
 import random
 import statistics
 from collections import Counter, defaultdict
@@ -163,7 +164,11 @@ def memory_report(cfg: dict, guard: dict) -> list[str]:
     excl = lmstudio.exclusive_problems({**cfg["model"]["exclusive"], "ledger_path": ROOT / cfg["model"]["exclusive"]["ledger"]},
                                        loaded)
     size = (lmstudio.LMS_MODELS / lm["model_file"]).stat().st_size
+    exe = lmstudio.engine_executable(lmstudio.runtime_info().get("gguf_engine"))
+    running = lmstudio.identify_engine([], lmstudio.list_processes(), exe)["new_after_load"] if exe else []
     return [f"- 시각 {mem['taken_at']}",
+            f"- 엔진 식별 (원인 확인 기록): 실행 파일 `{exe}` ({'있음' if exe and exe.exists() else '없음'}), "
+            f"지금 떠 있는 같은 엔진 프로세스 {len(running)}개. 방법: {lmstudio.ENGINE_ID_METHOD}",
             f"- `lms ps`: {lmstudio._identifiers(loaded) or '비어 있음'}",
             f"- 즉시 가용 {mem['available_gib']:.2f} GiB (free {mem['free_gib']:.2f} + inactive {mem['inactive_gib']:.2f}), "
             f"wired {mem['wired_gib']:.2f}, 압축 {mem['compressor_gib']:.2f}, 압박 단계 {mem['pressure_level']}, "
@@ -262,8 +267,64 @@ def apply_plan_report(cfg: dict, exp: dict, inputs=None) -> list[str]:
         v[4] += len(c["batches"])
     L += ["", "| 입력 | 실행 | 후보 쌍 | 새로 묻는 쌍 (캐시) | 호출 (캐시 없음) | 호출 (캐시) |", "|---|---|---|---|---|---|"]
     L += [f"| {k} | {v[0]} | {v[1]:,} | {v[2]:,} | {v[3]} | {v[4]} |" for k, v in sorted(per_input.items())]
-    L += ["", f"- 적용 조건 apply.response_format: {cfg['apply']['response_format']} (null이면 실행하지 않는다)", ""]
+    # 남은 호출: result.json이 없는 실행의 묶음 중 call 기록이 아직 없는 것 (실패 기록 .failed-*는 기록으로 치지 않는다)
+    left = []
+    for it in cached:
+        r = it["record"]
+        base = done_root / r["model_name"] / r["set"] / r["input"] / f"rep{r['rep']}"
+        if not (base / "result.json").exists():
+            left += [b for j, b in enumerate(it["batches"], start=1) if not (base / f"call{j:02d}.json").exists()]
+    per = cfg["apply"].get("calls_per_session")
+    _, _, secs = _tokens_and_time(left, cfg)
+    L += ["", f"- 남은 호출 (call 기록이 없는 것): {len(left)}회, 추정 시간 {secs / 3600:.2f} h",
+          f"- 세션 나누기 apply.calls_per_session: {per} → 세션 "
+          f"{math.ceil(len(left) / per) if per else (1 if left else 0)}번 (세션마다 로드 전 검사·원장·스왑 기준점 재설정, 끝나면 언로드)",
+          f"- 적용 조건 apply.response_format: {cfg['apply']['response_format']} (null이면 실행하지 않는다)", ""]
     return L
+
+
+def _g(x, nd=2):
+    return "—" if x is None else f"{x:.{nd}f}"
+
+
+def engine_memory_report(cfg: dict, out_root) -> list[str]:
+    """원인 확인 표 (2026-11-09 Jay): 호출별 프롬프트 토큰 × KV 토큰당 바이트와 엔진 프로세스 메모리 증가량을 나란히.
+
+    엔진 메모리 기록(preflight.engine)이 있는 호출만 센다. KV 토큰당 바이트는 설정의 kv_bytes_per_token
+    (Qwen3-8B: 36층 × KV 헤드 8 × head_dim 128 × K·V 2 × 2 B = 144 KiB)
+    """
+    from pathlib import Path
+
+    kv, GIB_ = cfg["model"]["lmstudio"]["kv_bytes_per_token"], 1024 ** 3
+    rows = []
+    for p in Path(out_root).glob("*/*/*/rep*/call*.json"):
+        if ".failed-" in p.name:
+            continue
+        rec = json.loads(p.read_text(encoding="utf-8"))
+        resp = rec.get("response") or {}
+        pre, post = resp.get("preflight") or {}, ((resp.get("server_info") or {}).get("memory_after_call") or {})
+        if "engine" not in pre:
+            continue
+        ctx = rec["context"]
+        rows.append((rec["started_at"], ctx, resp, pre, post))
+    rows.sort(key=lambda r: r[0])
+    L = [f"### 엔진 프로세스 메모리와 KV 추정 (호출 {len(rows)}회, KV {kv:,} B/토큰 = {kv / 1024:.0f} KiB)", "",
+         "| 세션 | 세션 내 | 실행·호출 | 프롬프트 토큰 | 출력 토큰 | 프롬프트×KV | (프롬프트+출력)×KV | 엔진 RSS 직전 | 직후 | RSS 증가 "
+         "| footprint 직전 | 직후 | footprint 증가 | 엔진 압축 직후 | 시스템 압축 직전 | 직후 |",
+         "|" + "---|" * 16]
+    for _, ctx, resp, pre, post in rows:
+        e0, e1 = pre.get("engine") or {}, post.get("engine") or {}
+        pt, ot = resp.get("input_tokens") or 0, resp.get("output_tokens") or 0
+        d = lambda a, b: None if a is None or b is None else b - a  # noqa: E731
+        L.append(f"| {ctx.get('session_number')} | {ctx.get('call_in_session')} | {ctx['input']} rep{ctx['rep']} "
+                 f"call{ctx['call']:02d} | {pt:,} | {ot:,} | {pt * kv / GIB_:.3f} | {(pt + ot) * kv / GIB_:.3f} "
+                 f"| {_g(e0.get('rss_gib'))} | {_g(e1.get('rss_gib'))} | {_g(d(e0.get('rss_gib'), e1.get('rss_gib')), 3)} "
+                 f"| {_g(e0.get('footprint_gib'))} | {_g(e1.get('footprint_gib'))} "
+                 f"| {_g(d(e0.get('footprint_gib'), e1.get('footprint_gib')), 3)} | {_g(e1.get('compressed_gib'))} "
+                 f"| {_g(pre.get('compressor_gib'))} | {_g(post.get('compressor_gib'))} |")
+    L += ["", "- 단위 GiB. RSS는 압축된 페이지를 포함하지 않는다. footprint(top MEM)는 압축된 페이지를 포함한다", ""]
+    return L
+
 
 
 # --------------------------------------------------------------------------- 실행과 요약

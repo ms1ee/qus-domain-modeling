@@ -26,6 +26,7 @@ def main() -> None:
     app.add_argument("--inputs", nargs="+", default=None, help="이 입력만 (예: original unambiguous unambiguous@50)")
     sc = sub.add_parser("r3llm-score", help="R3-LLM 103건 적용 채점 (정제 전 / R1+R2 / R1+R2+R3-LLM) → results/r3llm_apply_<세트>")
     sc.add_argument("--partial", action="store_true", help="적용이 끝난 실행만 채점 (진행 중 확인용)")
+    sub.add_parser("r3llm-memory", help="R3-LLM 적용 호출별 엔진 메모리와 KV 추정 표 → results/r3llm_engine_memory_<세트>.md")
     args = parser.parse_args()
 
     from .config import use_config
@@ -102,6 +103,17 @@ def main() -> None:
         from .r3llm_eval import evaluate as r3llm_score
 
         r3llm_score(args.partial)
+    elif args.command == "r3llm-memory":
+        from .config import ROOT, experiment_config
+        from .r3llm_validation import RESULTS, _set_id, engine_memory_report
+        from .refine_llm import load_config
+
+        exp = experiment_config()
+        lines = engine_memory_report(load_config(), ROOT / "runs" / exp.get("run_name", "phase1") / "r3llm")
+        out = RESULTS / f"r3llm_engine_memory_{_set_id(exp)}.md"
+        out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print("\n".join(lines))
+        print(f"→ {out}")
 
 
 if __name__ == "__main__":
