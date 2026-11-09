@@ -294,7 +294,9 @@ def engine_memory_report(cfg: dict, out_root) -> list[str]:
     """원인 확인 표 (2026-11-09 Jay): 호출별 프롬프트 토큰 × KV 토큰당 바이트와 엔진 프로세스 메모리 증가량을 나란히.
 
     엔진 메모리 기록(preflight.engine)이 있는 호출만 센다. KV 토큰당 바이트는 설정의 kv_bytes_per_token
-    (Qwen3-8B: 36층 × KV 헤드 8 × head_dim 128 × K·V 2 × 2 B = 144 KiB)
+    (Qwen3-8B: 36층 × KV 헤드 8 × head_dim 128 × K·V 2 × 2 B = 144 KiB).
+    "직전 호출 (프롬프트+출력)×KV"는 같은 세션의 바로 앞 호출 값이다 (새 요청을 시작할 때 앞 요청의 상태를
+    메모리 캐시에 저장한다는 가설과 비교하려는 열). 세션별 표는 sessions.jsonl의 엔진·스왑 기록을 함께 쓴다
     """
     from pathlib import Path
 
@@ -308,26 +310,62 @@ def engine_memory_report(cfg: dict, out_root) -> list[str]:
         pre, post = resp.get("preflight") or {}, ((resp.get("server_info") or {}).get("memory_after_call") or {})
         if "engine" not in pre:
             continue
-        ctx = rec["context"]
-        rows.append((rec["started_at"], ctx, resp, pre, post))
+        rows.append((rec["started_at"], rec["context"], resp, pre, post))
     rows.sort(key=lambda r: r[0])
-    L = [f"### 엔진 프로세스 메모리와 KV 추정 (호출 {len(rows)}회, KV {kv:,} B/토큰 = {kv / 1024:.0f} KiB)", "",
-         "| 세션 | 세션 내 | 실행·호출 | 프롬프트 토큰 | 출력 토큰 | 프롬프트×KV | (프롬프트+출력)×KV | 엔진 RSS 직전 | 직후 | RSS 증가 "
-         "| footprint 직전 | 직후 | footprint 증가 | 엔진 압축 직후 | 시스템 압축 직전 | 직후 |",
-         "|" + "---|" * 16]
+    d = lambda a, b: None if a is None or b is None else b - a  # noqa: E731
+    tok = lambda resp: (resp.get("input_tokens") or 0) + (resp.get("output_tokens") or 0)  # noqa: E731
+    L = [f"### 호출별 엔진 프로세스 메모리와 KV 추정 (호출 {len(rows)}회, KV {kv:,} B/토큰 = {kv / 1024:.0f} KiB)", "",
+         "| 세션 | 세션 내 | 실행·호출 | 프롬프트 토큰 | 출력 토큰 | 프롬프트×KV | (프롬프트+출력)×KV | 직전 호출 (프롬프트+출력)×KV "
+         "| 엔진 RSS 직전 | 직후 | RSS 증가 | footprint 직전 | 직후 | footprint 증가 | 엔진 압축 직후 | 시스템 압축 직전 | 직후 |",
+         "|" + "---|" * 17]
+    by_session, prev = {}, {}
     for _, ctx, resp, pre, post in rows:
+        key = (ctx.get("session") or {}).get("started_at")
         e0, e1 = pre.get("engine") or {}, post.get("engine") or {}
         pt, ot = resp.get("input_tokens") or 0, resp.get("output_tokens") or 0
-        d = lambda a, b: None if a is None or b is None else b - a  # noqa: E731
+        before = prev.get(key)
+        by_session.setdefault(key, []).append((ctx, resp, pre, post, before))
+        prev[key] = tok(resp)
         L.append(f"| {ctx.get('session_number')} | {ctx.get('call_in_session')} | {ctx['input']} rep{ctx['rep']} "
                  f"call{ctx['call']:02d} | {pt:,} | {ot:,} | {pt * kv / GIB_:.3f} | {(pt + ot) * kv / GIB_:.3f} "
+                 f"| {_g(before * kv / GIB_ if before is not None else None, 3)} "
                  f"| {_g(e0.get('rss_gib'))} | {_g(e1.get('rss_gib'))} | {_g(d(e0.get('rss_gib'), e1.get('rss_gib')), 3)} "
                  f"| {_g(e0.get('footprint_gib'))} | {_g(e1.get('footprint_gib'))} "
                  f"| {_g(d(e0.get('footprint_gib'), e1.get('footprint_gib')), 3)} | {_g(e1.get('compressed_gib'))} "
                  f"| {_g(pre.get('compressor_gib'))} | {_g(post.get('compressor_gib'))} |")
     L += ["", "- 단위 GiB. RSS는 압축된 페이지를 포함하지 않는다. footprint(top MEM)는 압축된 페이지를 포함한다", ""]
-    return L
 
+    sessions = {}
+    log = Path(out_root) / "sessions.jsonl"
+    if log.exists():
+        for line in log.read_text(encoding="utf-8").splitlines():
+            s = json.loads(line)
+            if s.get("engine"):
+                sessions[s["started_at"]] = s
+    cum = cfg["apply"].get("cumulative_swap") or {}
+    base = cum.get("baseline_gib")
+    L += [f"### 세션별 엔진 footprint 증가와 KV 추정, 스왑 (세션 {len(sessions)}번)", "",
+          "| 세션 | 엔진 pid | 호출 | footprint 로드 직후 | 마지막 호출 직후 | 증가 | Σ 직전 호출 (프롬프트+출력)×KV "
+          "| Σ 모든 호출 (프롬프트+출력)×KV | 스왑 로드 직전 | 언로드 후 | 세션 증가 | 누적 (기준점 대비) "
+          "| 엔진 명령줄 --cache-ram | 언로드 후 엔진 |",
+          "|" + "---|" * 14]
+    for n, (key, s) in enumerate(sorted(sessions.items()), start=1):
+        calls = by_session.get(key, [])
+        eng = s["engine"]
+        fp0 = (eng.get("after_load") or {}).get("footprint_gib")
+        fp1 = ((calls[-1][3].get("engine") or {}).get("footprint_gib")) if calls else None
+        prev_sum = sum(c[4] for c in calls if c[4] is not None) * kv / GIB_
+        all_sum = sum(tok(c[1]) for c in calls) * kv / GIB_
+        sw0 = (s.get("memory_before_load") or {}).get("swap_used_gib")
+        sw1 = (s.get("memory_after_unload") or {}).get("swap_used_gib")
+        cmd = " ".join(c["command"] for c in eng.get("new_after_load", []))
+        alive = (eng.get("after_unload") or {}).get("alive")
+        L.append(f"| {n} | {eng.get('pid')} | {len(calls)} | {_g(fp0)} | {_g(fp1)} | {_g(d(fp0, fp1), 3)} | {prev_sum:.3f} "
+                 f"| {all_sum:.3f} | {_g(sw0)} | {_g(sw1)} | {_g(d(sw0, sw1), 3)} "
+                 f"| {_g(d(base, sw1), 3) if base is not None else '—'} | {'있음' if '--cache-ram' in cmd else '없음'} "
+                 f"| {'남아 있음' if alive else '사라짐' if alive is False else '—'} |")
+    L += ["", f"- 누적 기준점: 스왑 {_g(base)} GiB ({cum.get('baseline_at')}), 상한 +{cum.get('max_increase_gib')} GiB", ""]
+    return L
 
 
 # --------------------------------------------------------------------------- 실행과 요약

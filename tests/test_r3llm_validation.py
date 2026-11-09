@@ -81,4 +81,18 @@ def test_engine_memory_report_puts_kv_estimate_next_to_engine_growth(tmp_path):
     L = V.engine_memory_report(cfg, tmp_path)
     assert "호출 1회" in L[0] and "144 KiB" in L[0]
     row = L[4]
-    assert "| original rep1 call01 | 1,024 | 0 | 0.141 | 0.141 | 6.00 | 6.25 | 0.250 | 7.00 | 7.50 | 0.500 | 0.10 | 3.00 | 3.50 |" in row
+    assert "| original rep1 call01 | 1,024 | 0 | 0.141 | 0.141 | — | 6.00 | 6.25 | 0.250 | 7.00 | 7.50 | 0.500 | 0.10 | 3.00 | 3.50 |" in row
+    # 같은 세션의 다음 호출은 직전 호출 (프롬프트+출력)×KV를 옆에 둔다. 세션 표는 sessions.jsonl과 started_at으로 잇는다
+    sess = {"started_at": "S1"}
+    rec["context"]["session"] = sess
+    (d / "call01.json").write_text(_json.dumps(rec))
+    nxt = {**rec, "started_at": "2026-11-09T03:00:20", "context": {**rec["context"], "call": 4, "call_in_session": 2}}
+    (d / "call04.json").write_text(_json.dumps(nxt))
+    (tmp_path / "sessions.jsonl").write_text(_json.dumps({
+        "started_at": "S1", "memory_before_load": {"swap_used_gib": 1.0}, "memory_after_unload": {"swap_used_gib": 1.5},
+        "engine": {"pid": 7, "after_load": {"footprint_gib": 6.5}, "after_unload": {"alive": False},
+                   "new_after_load": [{"command": "llama-server --api-key <redacted>"}]}}) + "\n")
+    L = V.engine_memory_report(cfg, tmp_path)
+    assert "| original rep1 call04 | 1,024 | 0 | 0.141 | 0.141 | 0.141 |" in L[5]
+    srow = next(x for x in L if x.startswith("| 1 | 7 |"))
+    assert srow.startswith("| 1 | 7 | 2 | 6.50 | 7.50 | 1.000 | 0.141 | 0.281 | 1.00 | 1.50 | 0.500 |") and "| 없음 | 사라짐 |" in srow
