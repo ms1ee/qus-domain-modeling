@@ -1,14 +1,17 @@
-"""일반화 검증 채점 (DRAFT, 2026-11-11 Jay) — 숫자만 적고 판단하지 않는다. 모델 호출 없음.
+"""일반화·검증 세트 채점 (DRAFT, 2026-11-11 Jay) — 숫자만 적고 판단하지 않는다. 모델 호출 없음.
 
-본 실험 세트 4개 원본 × Mistral 10회 (config/generalization.yaml). 세트마다
-- n=3 (100번, seed 고정): 다수결(등장 2회 이상)과 kg-conf-v1-n3 (고정 임계값)
-- n=10: 다수결(등장 6회 이상)과 kg-conf-v1 (고정 임계값)
-의 클래스 P/R/F1과 정답 예측 AUC. 참고로 단일 실행 평균. R1(role 자리에만 나오는 행위자)의 제거 수·정답 손실.
+원본 스토리 × Mistral 10회 실행 묶음 하나(--config generalization.yaml: 탐색 세트, validation.yaml: 검증 세트)를 채점한다.
+세트마다 n=3(부분 표본 100번)과 n=10에서, 사전 고정한 config/kg_rank_v1.yaml의 비교를 나란히 적는다
+- 다수결(등장 실행 수 > n/2), 다수결 + R1, kg-rank-v1(R1 뒤 kg-conf 점수 상위 m개), 기존 임계값 방식(v1 0.27, v1-n3 0.25)
+- 클래스 P/R/F1, 정답 예측 AUC, 선택 수. 참고로 단일 실행 평균. R1의 제거 수·정답 손실
+- 판정 기준: "n=3 kg-rank-v1 ≥ n=10 다수결"인 세트 수, 같은 n 다수결 대비 F1 차이의 정확 부호검정.
+  판정은 검증 세트로만 한다 (탐색 세트는 참고)
 kg-conf 모델은 config/kg_conf_v1.json에서 읽기만 한다 (School에서만 학습·임계값 결정, 다른 세트에서 재학습·재조정 금지).
 노드·특징·라벨 정의는 출처 KG 예비 분석과 같다 (qus/kg_preanalysis.py, kg_preanalysis_eval.labeled_rows).
 """
 import hashlib
 import json
+import math
 import random
 import statistics
 
@@ -22,7 +25,8 @@ from .score import Matcher, score_classes
 
 RESULTS = ROOT / "results"
 METRICS = ("precision", "recall", "f1")
-N_SMALL, REPEATS, SEED = 3, 100, 2026
+METHODS = ("majority", "majority_r1", "kg_rank", "threshold")
+VALIDATION_SETS = ("fish_chips", "planningpoker", "recycling", "sports")
 
 
 def load_sets(exp: dict, rules: dict, gold: dict, fixes: dict) -> dict:
@@ -44,29 +48,77 @@ def _name(row: dict) -> str:
     return max(row["names"].items(), key=lambda kv: kv[1])[0]
 
 
-def evaluate_selection(rows: list[dict], scores: list[float], keep, m: Matcher) -> dict:
-    """keep(score) → 남길지. 남긴 노드(가장 많이 나온 표기)의 클래스 P/R/F1과, 점수의 정답 예측 AUC."""
-    s = score_classes([_name(r) for r, x in zip(rows, scores) if keep(x)], m)
-    return {**{k: s[k] for k in METRICS}, "n_selected": sum(keep(x) for x in scores),
-            "auc": K.auc(scores, [r["gold"] for r in rows])}
+def evaluate_selection(rows: list[dict], scores: list[float], chosen: list[bool], m: Matcher) -> dict:
+    """고른 노드(가장 많이 나온 표기)의 클래스 P/R/F1, 선택 수, 후보 노드 점수의 정답 예측 AUC."""
+    s = score_classes([_name(r) for r, c in zip(rows, chosen) if c], m)
+    return {**{k: s[k] for k in METRICS}, "n_selected": sum(chosen), "auc": K.auc(scores, [r["gold"] for r in rows])}
 
 
-def methods(runs: list[dict], ks: K.KeyStories, m: Matcher, model: dict) -> dict:
+def r1_keys(runs: list[dict], rules: dict) -> set[str]:
+    """n회 중 어느 실행에서든 R1에 지워지는 노드 키 (R1은 키와 스토리 텍스트로만 정해진다)."""
+    return {x["key"] for r in runs for x in refine(r["nodes"], [R1], rules)["removed"]}
+
+
+def rank_m(runs: list[dict]) -> int:
+    """kg-rank-v1의 m: 실행마다 서로 다른 노드 키 수(R1 전)의 중앙값을 정수로 반올림 (0.5는 올림)."""
+    return int(math.floor(statistics.median(len({nd["key"] for nd in r["nodes"] if nd["key"]}) for r in runs) + 0.5))
+
+
+def kg_rank(rows: list[dict], scores: dict[str, float], m: int) -> set[str]:
+    """점수 내림차순, 동점은 등장 실행 수 많은 순, 그다음 키 사전순으로 상위 m개 키."""
+    return {r["key"] for r in sorted(rows, key=lambda r: (-scores[r["key"]], -r["runs"], r["key"]))[:m]}
+
+
+def methods(runs: list[dict], ks: K.KeyStories, m: Matcher, model: dict, rules: dict) -> dict:
+    """한 입력(실행 n회): 다수결, 다수결 + R1, kg-rank-v1, 임계값 방식."""
     n = len(runs)
     rows = labeled_rows(runs, ks, m)
-    counts = [r["runs"] for r in rows]
-    conf = K.kg_conf_scores(model, rows)
-    return {"majority": evaluate_selection(rows, [c / n for c in counts], lambda x: x * n * 2 > n, m),
-            "kg_conf": evaluate_selection(rows, conf, lambda x: x >= model["threshold"], m),
-            "n_nodes": len(rows), "n_pos": sum(r["gold"] for r in rows)}
+    gone = r1_keys(runs, rules)
+    kept = [r for r in rows if r["key"] not in gone]
+    conf = dict(zip((r["key"] for r in rows), K.kg_conf_scores(model, rows)))
+    ratio = lambda rs: [r["runs"] / n for r in rs]  # noqa: E731
+    majority = lambda rs: [r["runs"] * 2 > n for r in rs]  # noqa: E731
+    mm = rank_m(runs)
+    ranked = kg_rank(kept, conf, mm)
+    return {"majority": evaluate_selection(rows, ratio(rows), majority(rows), m),
+            "majority_r1": evaluate_selection(kept, ratio(kept), majority(kept), m),
+            "kg_rank": {**evaluate_selection(kept, [conf[r["key"]] for r in kept], [r["key"] in ranked for r in kept], m), "m": mm},
+            "threshold": evaluate_selection(rows, [conf[r["key"]] for r in rows],
+                                            [conf[r["key"]] >= model["threshold"] for r in rows], m),
+            "n_nodes": len(rows), "n_pos": sum(r["gold"] for r in rows), "n_r1_removed": len(rows) - len(kept)}
 
 
 def _summ(values: list[dict], keys) -> dict:
     out = {}
     for k in keys:
-        xs = [v[k] for v in values if v[k] is not None]
+        xs = [v[k] for v in values if v.get(k) is not None]
         out[k] = {"mean": sum(xs) / len(xs) if xs else None, "sd": statistics.stdev(xs) if len(xs) > 1 else None}
     return out
+
+
+def sign_test(diffs: list[float]) -> dict:
+    """정확 부호검정: |차이| < 1e-9는 뺀다. 한쪽 p = P(X ≥ 양수 수), 양쪽 p = min(1, 2·min(위, 아래))."""
+    d = [x for x in diffs if abs(x) >= 1e-9]
+    n, k = len(d), sum(x > 0 for x in d)
+    if not n:
+        return {"n": 0, "positive": 0, "p_one_sided": None, "p_two_sided": None}
+    upper = sum(math.comb(n, i) for i in range(k, n + 1)) / 2 ** n
+    lower = sum(math.comb(n, i) for i in range(0, k + 1)) / 2 ** n
+    return {"n": n, "positive": k, "negative": n - k, "ties": len(diffs) - n,
+            "p_one_sided": upper, "p_two_sided": min(1.0, 2 * min(upper, lower))}
+
+
+def decision(sets: dict) -> dict:
+    """사전 고정 판정 기준 (config/kg_rank_v1.yaml decision)."""
+    rows = {s: v for s, v in sets.items() if v}
+    n3_rank = {s: v["n3"]["kg_rank"]["f1"]["mean"] for s, v in rows.items()}
+    n10_maj = {s: v["n10"]["majority"]["f1"] for s, v in rows.items()}
+    diff3 = {s: n3_rank[s] - v["n3"]["majority"]["f1"]["mean"] for s, v in rows.items()}
+    diff10 = {s: v["n10"]["kg_rank"]["f1"] - n10_maj[s] for s, v in rows.items()}
+    return {"n3_rank_ge_n10_majority": {s: n3_rank[s] >= n10_maj[s] for s in rows},
+            "count_n3_rank_ge_n10_majority": sum(n3_rank[s] >= n10_maj[s] for s in rows), "n_sets": len(rows),
+            "diff_n3_rank_minus_majority": diff3, "diff_n10_rank_minus_majority": diff10,
+            "sign_test_n3": sign_test(list(diff3.values())), "sign_test_n10": sign_test(list(diff10.values()))}
 
 
 def r1_report(runs: list[dict], m: Matcher, rules: dict) -> dict:
@@ -94,12 +146,19 @@ def r1_report(runs: list[dict], m: Matcher, rules: dict) -> dict:
 def evaluate() -> dict:
     exp, rules = experiment_config(), load_rules()
     gold, fixes = load_gold(), load_yaml("gold_fixes.yaml")
+    rank = load_yaml("kg_rank_v1.yaml")
+    if rank.get("status") != "frozen":
+        raise ValueError("config/kg_rank_v1.yaml이 고정 상태가 아니다")
+    sub = rank["subsample"]
     data = load_sets(exp, rules, gold, fixes)
     v1, n3 = K.load_kg_conf(name="kg-conf-v1"), K.load_kg_conf(name="kg-conf-v1-n3")
+    sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()  # noqa: E731
     out = {"run_name": exp.get("run_name"), "models": {"kg-conf-v1": {"threshold": v1["threshold"]},
                                                        "kg-conf-v1-n3": {"threshold": n3["threshold"]}},
-           "kg_conf_file_sha256": hashlib.sha256((ROOT / "config" / "kg_conf_v1.json").read_bytes()).hexdigest(),
-           "subsample": {"n": N_SMALL, "repeats": REPEATS, "seed": SEED}, "sets": {}}
+           "kg_conf_file_sha256": sha(ROOT / "config" / "kg_conf_v1.json"),
+           "kg_rank_file_sha256": sha(ROOT / "config" / "kg_rank_v1.yaml"),
+           "judged": set(exp["sets"]) == set(VALIDATION_SETS), "subsample": sub, "sets": {}}
+    keys = (*METRICS, "auc", "n_selected")
     for set_id in exp["sets"]:
         d = data.get(set_id)
         if not d:
@@ -107,21 +166,23 @@ def evaluate() -> dict:
             continue
         runs, ks, m = d["runs"], d["ks"], d["matcher"]
         single = [score_classes(r["classes"], m) for r in runs]
-        full = methods(runs, ks, m, v1)
+        full = methods(runs, ks, m, v1, rules)
         reps = []
-        for rep in range(REPEATS):
-            rng = random.Random(f"{SEED}:{set_id}:{N_SMALL}:{rep}")
-            idx = sorted(rng.sample(range(len(runs)), N_SMALL))
-            reps.append(methods([runs[j] for j in idx], ks, m, n3))
-        keys = (*METRICS, "auc", "n_selected")
+        for rep in range(sub["repeats"]):
+            rng = random.Random(f"{sub['seed']}:{set_id}:{sub['n']}:{rep}")
+            idx = sorted(rng.sample(range(len(runs)), sub["n"]))
+            reps.append(methods([runs[j] for j in idx], ks, m, n3, rules))
         out["sets"][set_id] = {
             "n_runs": len(runs), "n_gold": len(m.classes),
             "single": {k: sum(s[k] for s in single) / len(single) for k in METRICS},
-            "n10": {"majority": full["majority"], "kg_conf_v1": full["kg_conf"], "n_nodes": full["n_nodes"], "n_pos": full["n_pos"]},
-            "n3": {"majority": _summ([r["majority"] for r in reps], keys), "kg_conf_v1_n3": _summ([r["kg_conf"] for r in reps], keys),
+            "n10": {**{k: full[k] for k in METHODS}, "n_nodes": full["n_nodes"], "n_pos": full["n_pos"],
+                    "n_r1_removed": full["n_r1_removed"]},
+            "n3": {**{k: _summ([r[k] for r in reps], keys) for k in METHODS},
+                   "kg_rank_m": _summ([r["kg_rank"] for r in reps], ("m",))["m"],
                    "n_nodes": statistics.mean(r["n_nodes"] for r in reps)},
             "r1": r1_report(runs, m, rules)}
-    base = RESULTS / "generalization"
+    out["decision"] = decision(out["sets"])
+    base = RESULTS / exp.get("run_name", "phase1")
     base.with_suffix(".json").write_text(json.dumps(out, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     base.with_suffix(".md").write_text("\n".join(markdown(out)) + "\n", encoding="utf-8")
     print(f"→ {base.with_suffix('.md').relative_to(ROOT)}, {base.with_suffix('.json').relative_to(ROOT)}")
@@ -132,30 +193,37 @@ def _f(x, nd=3):
     return "—" if x is None else f"{x:.{nd}f}"
 
 
+LABELS = {"majority": "다수결", "majority_r1": "다수결 + R1", "kg_rank": "kg-rank-v1", "threshold": "임계값"}
+
+
 def markdown(out: dict) -> list[str]:
     t1, t3 = out["models"]["kg-conf-v1"]["threshold"], out["models"]["kg-conf-v1-n3"]["threshold"]
-    L = ["# 일반화 검증 — 본 실험 세트 4개 원본 (DRAFT, 숫자만, 판단 없음)", "",
+    judged = out["judged"]
+    L = [f"# {'검증 세트 — 판정용' if judged else '탐색 세트 — 참고 (판정 아님)'}: {out['run_name']} (DRAFT, 숫자만, 판단 없음)", "",
          "- 추출: Mistral-7B 로컬, 세트마다 원본 스토리 10회 (seed 1–10), 결함 주입 없음",
-         f"- kg-conf는 config/kg_conf_v1.json에서 읽기만 했다 (School에서만 학습·임계값 결정, sha256 {out['kg_conf_file_sha256'][:12]}…). "
-         f"n=10은 kg-conf-v1 (임계값 {t1}), n=3은 kg-conf-v1-n3 (임계값 {t3})",
-         "- 다수결 = 등장 실행 수 > n/2 (n=3 → 2회 이상, n=10 → 6회 이상). AUC는 노드 점수(다수결은 등장 비율)의 정답 예측",
-         f"- n=3: 실행 3회 비복원 추출 {out['subsample']['repeats']}번 (seed {out['subsample']['seed']}), 평균 (SD)",
-         "- 노드·특징·라벨 정의는 출처 KG 예비 분석과 같다 (정제 전 클래스, 출처 그래프 노드 키)", ""]
+         f"- 사전 고정 규칙: config/kg_rank_v1.yaml (sha256 {out['kg_rank_file_sha256'][:12]}…). "
+         "kg-rank-v1은 탐색 세트 결과를 본 뒤 정한 사후 설계라서, 판정은 검증 세트로만 한다",
+         f"- kg-conf: config/kg_conf_v1.json (sha256 {out['kg_conf_file_sha256'][:12]}…), 읽기만. n=10 kg-conf-v1, n=3 kg-conf-v1-n3",
+         f"- 다수결 = 등장 실행 수 > n/2. 임계값 = n=10 v1 ≥ {t1}, n=3 v1-n3 ≥ {t3} (R1 없음). "
+         "kg-rank-v1 = R1 뒤 kg-conf 점수 상위 m개 (m = 실행별 클래스 수 중앙값 반올림)",
+         f"- n=3: 실행 3회 비복원 추출 {out['subsample']['repeats']}번 (seed {out['subsample']['seed']}), 평균 (SD). "
+         "AUC는 각 방법의 후보 노드(R1을 쓰는 방법은 R1 뒤) 점수로 잰 정답 예측", ""]
     for set_id, s in out["sets"].items():
         if s is None:
             L += [f"## {set_id}: 실행 기록 없음", ""]
             continue
         L += [f"## {set_id} (정답 클래스 {s['n_gold']}, 실행 {s['n_runs']})", "",
-              "| 방법 | P | R | F1 | 정답 예측 AUC | 선택 수 |", "|---|---|---|---|---|---|",
-              f"| 단일 실행 평균 | {_f(s['single']['precision'])} | {_f(s['single']['recall'])} | {_f(s['single']['f1'])} | — | — |"]
-        for key, label in (("majority", "n=3 다수결 (≥2)"), ("kg_conf_v1_n3", f"n=3 kg-conf-v1-n3 (≥{t3})")):
-            v = s["n3"][key]
-            cell = lambda k: f"{_f(v[k]['mean'])} ({_f(v[k]['sd'])})"  # noqa: E731
-            L.append(f"| {label} | {cell('precision')} | {cell('recall')} | {cell('f1')} | {cell('auc')} "
-                     f"| {_f(v['n_selected']['mean'], 1)} |")
-        for key, label in (("majority", "n=10 다수결 (≥6)"), ("kg_conf_v1", f"n=10 kg-conf-v1 (≥{t1})")):
-            v = s["n10"][key]
-            L.append(f"| {label} | {_f(v['precision'])} | {_f(v['recall'])} | {_f(v['f1'])} | {_f(v['auc'])} | {v['n_selected']} |")
+              "| n | 방법 | P | R | F1 | 정답 예측 AUC | 선택 수 |", "|---|---|---|---|---|---|---|",
+              f"| 1 | 단일 실행 평균 | {_f(s['single']['precision'])} | {_f(s['single']['recall'])} | {_f(s['single']['f1'])} | — | — |"]
+        for k in METHODS:
+            v = s["n3"][k]
+            cell = lambda x: f"{_f(v[x]['mean'])} ({_f(v[x]['sd'])})"  # noqa: E731
+            label = LABELS[k] + (f" (v1-n3 ≥ {t3})" if k == "threshold" else f" (m 평균 {_f(s['n3']['kg_rank_m']['mean'], 1)})" if k == "kg_rank" else "")
+            L.append(f"| 3 | {label} | {cell('precision')} | {cell('recall')} | {cell('f1')} | {cell('auc')} | {_f(v['n_selected']['mean'], 1)} |")
+        for k in METHODS:
+            v = s["n10"][k]
+            label = LABELS[k] + (f" (v1 ≥ {t1})" if k == "threshold" else f" (m {v['m']})" if k == "kg_rank" else "")
+            L.append(f"| 10 | {label} | {_f(v['precision'])} | {_f(v['recall'])} | {_f(v['f1'])} | {_f(v['auc'])} | {v['n_selected']} |")
         r1 = s["r1"]
         L += ["", f"- R1 (실행당 평균): 제거 {_f(r1['removed_mean'], 2)} (정답 손실 {_f(r1['tp_mean'], 2)}, 정답 밖 {_f(r1['fp_mean'], 2)}, "
               f"중복 {_f(r1['dup_mean'], 2)}, 표기 반복 {_f(r1['collapsed_mean'], 2)}). 10회 합: 제거 {r1['removed_total']}, 정답 손실 {r1['tp_total']}",
@@ -163,4 +231,18 @@ def markdown(out: dict) -> list[str]:
               f"{_f(r1['after']['precision'])}/{_f(r1['after']['recall'])}/{_f(r1['after']['f1'])}",
               "- R1이 잃은 정답 (실행 수): " + (", ".join(f"{g} {c}" for g, c in sorted(r1["lost_gold"].items(), key=lambda kv: (-kv[1], kv[0]))) or "없음"),
               ""]
-    return L
+    d = out["decision"]
+    L += [f"## 판정 기준 ({'검증 세트 — 판정' if judged else '탐색 세트 — 참고, 판정 아님'})", "",
+          "| 세트 | n=3 kg-rank-v1 F1 | n=10 다수결 F1 | n=3 kg-rank ≥ n=10 다수결 | n=3: kg-rank − 다수결 | n=10: kg-rank − 다수결 |",
+          "|---|---|---|---|---|---|"]
+    for set_id, s in out["sets"].items():
+        if s:
+            L.append(f"| {set_id} | {_f(s['n3']['kg_rank']['f1']['mean'])} | {_f(s['n10']['majority']['f1'])} "
+                     f"| {'예' if d['n3_rank_ge_n10_majority'][set_id] else '아니오'} | {d['diff_n3_rank_minus_majority'][set_id]:+.3f} "
+                     f"| {d['diff_n10_rank_minus_majority'][set_id]:+.3f} |")
+    L += ["", f"- (1) n=3 kg-rank-v1 ≥ n=10 다수결: {d['count_n3_rank_ge_n10_majority']} / {d['n_sets']} 세트"]
+    for key, label in (("sign_test_n3", "n=3"), ("sign_test_n10", "n=10")):
+        t = d[key]
+        L.append(f"- (2) 부호검정 {label} (kg-rank − 다수결): 양수 {t['positive']}, 음수 {t.get('negative', 0)}, 0 {t.get('ties', 0)} → "
+                 f"한쪽 p {_f(t['p_one_sided'], 4)}, 양쪽 p {_f(t['p_two_sided'], 4)}")
+    return L + [""]
