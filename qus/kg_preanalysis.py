@@ -209,3 +209,20 @@ def spearman(xs: list[float], ys: list[float]) -> float | None:
     sxy = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
     sxx, syy = sum((a - mx) ** 2 for a in rx), sum((b - my) ** 2 for b in ry)
     return sxy / math.sqrt(sxx * syy) if sxx and syy else None
+
+
+def load_kg_conf(path=None) -> dict:
+    """고정된 신뢰도 모델 kg-conf-v1 (config/kg_conf_v1.json). 학습하지 않고 읽기만 한다."""
+    import json
+
+    from .config import CONFIG_DIR
+
+    model = json.loads((path or CONFIG_DIR / "kg_conf_v1.json").read_text(encoding="utf-8"))
+    if model.get("status") != "frozen" or model["features"] != list(FEATURES_B):
+        raise ValueError("kg-conf-v1 파일의 상태나 특징 목록이 지금 코드와 다르다")
+    return model
+
+
+def kg_conf_scores(model: dict, rows: list[dict]) -> list[float]:
+    """노드 특징 행 → 고정 모델 점수 (정답일 확률)."""
+    return predict(model, [[r[f] for f in model["features"]] for r in rows])

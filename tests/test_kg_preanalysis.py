@@ -79,3 +79,23 @@ def test_gold_endpoint_only_and_loio():
                 for i in ("a", "b", "c")}
     res = E.loio(by_input, ("runs",), 1.0)
     assert set(res["per_input"]) == {"a", "b", "c"} and all(v == 1.0 for v in res["per_input"].values())
+
+
+def test_kg_conf_v1_is_frozen_and_scores_without_training(tmp_path):
+    model = K.load_kg_conf()
+    assert model["name"] == "kg-conf-v1" and model["trained_on"]["set"] == "school" and len(model["w"]) == 8
+    rows = [{f: 0.0 for f in K.FEATURES_B} for _ in range(2)]
+    rows[1].update(runs=10, n_stories=10, pos_role=1.0)
+    lo, hi = K.kg_conf_scores(model, rows)
+    assert 0 < lo < hi < 1
+    bad = tmp_path / "m.json"
+    bad.write_text('{"status": "draft", "features": []}')
+    with pytest.raises(ValueError):
+        K.load_kg_conf(bad)
+
+
+def test_freeze_refuses_to_overwrite(tmp_path):
+    p = tmp_path / "kg_conf_v1.json"
+    p.write_text("{}")
+    with pytest.raises(FileExistsError):
+        E.freeze_kg_conf(p)

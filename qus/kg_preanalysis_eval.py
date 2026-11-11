@@ -252,3 +252,56 @@ def evaluate() -> dict:
     base.with_suffix(".md").write_text("\n".join(markdown(out)) + "\n", encoding="utf-8")
     print(f"→ {base.with_suffix('.md').relative_to(ROOT)}, {base.with_suffix('.json').relative_to(ROOT)}")
     return out
+
+
+# --------------------------------------------------------------------------- kg-conf-v1 고정 (2026-11-11 Jay)
+
+KG_CONF_FILE = "kg_conf_v1.json"
+
+
+def freeze_kg_conf(path=None) -> dict:
+    """School 스모크 실행으로 학습한 신뢰도 모델(전체 특징, L2 λ=1)을 지금 상태로 고정해 저장한다.
+
+    kg-conf-v1: School에서만 학습한다. 다른 세트에서 재학습하지 않는다 (decisions.md 2026-11-11).
+    이미 파일이 있으면 덮어쓰지 않고 멈춘다
+    """
+    import hashlib
+    from datetime import datetime, timezone
+
+    from .config import CONFIG_DIR
+
+    path = path or CONFIG_DIR / KG_CONF_FILE
+    if path.exists():
+        raise FileExistsError(f"{path.name}가 이미 있다 (고정된 모델). 덮어쓰지 않는다")
+    exp, rules, cfg = experiment_config(), load_rules(), K.load_config()
+    gold, fixes = load_gold(), load_yaml("gold_fixes.yaml")
+    data = load_inputs(exp, rules, gold, fixes)
+    inputs = cfg["prediction"]["inputs"]
+    sets = {data[i]["set"] for i in inputs}
+    if sets != {"school"}:
+        raise ValueError(f"kg-conf-v1은 School에서만 학습한다: {sets}")
+    rows = [r for i in inputs for r in labeled_rows(data[i]["runs"], data[i]["ks"], data[i]["matcher"])]
+    l2 = cfg["prediction"]["model"]["l2"]
+    model = K.fit_logistic([[r[f] for f in K.FEATURES_B] for r in rows], [r["gold"] for r in rows], l2=l2)
+    run_root = ROOT / "runs" / exp.get("run_name", "phase1")
+    records = sorted(p for i in inputs for p in run_root.glob(f"*/*/{i}/rep*.json"))
+    sha = lambda b: hashlib.sha256(b).hexdigest()  # noqa: E731
+    out = {"name": "kg-conf-v1", "status": "frozen",
+           "note": "School 스모크 실행으로만 학습. 다른 세트에서 재학습 금지 (SWE_prj notes/decisions.md 2026-11-11)",
+           "features": list(K.FEATURES_B), "intercept_first": True,
+           "w": model["w"], "mu": model["mu"], "sd": model["sd"], "l2": l2,
+           "standardized_coefficients": {"intercept": model["w"][0], **dict(zip(K.FEATURES_B, model["w"][1:]))},
+           "trained_on": {"set": "school", "run_name": exp.get("run_name"), "inputs": inputs, "runs_per_input": 10,
+                          "n_rows": len(rows), "n_pos": sum(r["gold"] for r in rows),
+                          "run_records": len(records),
+                          "run_records_sha256": sha("".join(sha(p.read_bytes()) for p in records).encode()),
+                          "rows_sha256": sha(json.dumps([[r[f] for f in K.FEATURES_B] + [r["gold"]] for r in rows]).encode())},
+           "definitions": {"node": cfg["prediction"].get("label"), "evidence": cfg["prediction"]["evidence"],
+                           "features": "kg_preanalysis.node_features (runs = 등장 실행 수, 실행 10회 기준)"},
+           "code_sha256": {"qus/kg_preanalysis.py": sha((ROOT / "qus" / "kg_preanalysis.py").read_bytes()),
+                           "qus/kg_preanalysis_eval.py": sha((ROOT / "qus" / "kg_preanalysis_eval.py").read_bytes()),
+                           "config/kg_preanalysis.yaml": sha((CONFIG_DIR / K.CONFIG_FILE).read_bytes())},
+           "created_at": datetime.now(timezone.utc).isoformat()}
+    path.write_text(json.dumps(out, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    print(f"→ {path.relative_to(ROOT)} (n_rows {len(rows)}, 양성 {out['trained_on']['n_pos']})")
+    return out
