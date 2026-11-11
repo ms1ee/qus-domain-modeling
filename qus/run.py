@@ -13,6 +13,7 @@ import json
 import os
 import statistics
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from .config import BENCHMARK_DIR, ROOT, config_name, experiment_config, load_yaml
@@ -164,6 +165,12 @@ def rep_model_config(model_cfg: dict, rep: int) -> dict:
 
 
 def _run_model(model_name: str, model_cfg: dict, jobs: list[tuple], infos: dict) -> None:
+    """LM Studio 모델: 설정에 sessions가 있으면 실행 runs_per_session건마다 언로드하고 다시 로드한다 (2026-11-11 Jay).
+
+    sessions.exclusive가 있으면 세션마다 공존 규칙 검사(로드 목록 비어 있음, 최근 활동 없음, 원장 기준)를 한다.
+    sessions.cumulative_swap: 기준점(없으면 오늘 첫 세션 전 스왑, runs/<run_name>/swap_baseline.json) 대비 누적 증가 상한.
+    엔진 프로세스 메모리를 호출 직전·직후에 기록한다. sessions가 없으면 예전처럼 세션 하나로 끝까지 간다
+    """
     lm_cfg = model_cfg.get("lmstudio")
     if not lm_cfg:
         _run_jobs(lambda rep: make_client(rep_model_config(model_cfg, rep)), model_name, model_cfg, jobs, infos, None)
@@ -171,31 +178,65 @@ def _run_model(model_name: str, model_cfg: dict, jobs: list[tuple], infos: dict)
 
     from . import lmstudio
 
-    guard = experiment_config()["memory_guard"]
-    with lmstudio.smoke_model(lm_cfg, guard, on_close=lambda s: _append_jsonl("sessions.jsonl", s),
-                              ledger=ROOT / "runs" / "ledger.jsonl") as session:
-        check = lmstudio.preflight(session["identifier"], guard, session["swap_baseline_gib"])
-        _run_jobs(lambda rep: make_client({**rep_model_config(model_cfg, rep), "model": session["identifier"]},
-                                          preflight=check, postflight=lmstudio.server_call_info),
-                  model_name, model_cfg, jobs, infos, session)
+    cfg = experiment_config()
+    guard, sc = cfg["memory_guard"], cfg.get("sessions") or {}
+    exclusive = ({**sc["exclusive"], "ledger_path": ROOT / sc["exclusive"]["ledger"]} if sc.get("exclusive") else None)
+
+    @contextmanager
+    def open_session():
+        with lmstudio.smoke_model(lm_cfg, guard, on_close=lambda s: _append_jsonl("sessions.jsonl", s),
+                                  exclusive=exclusive, ledger=ROOT / "runs" / "ledger.jsonl") as session:
+            pid = (session.get("engine") or {}).get("pid")
+            check = lmstudio.preflight(session["identifier"], guard, session["swap_baseline_gib"], engine_pid=pid)
+            post = lmstudio.postflight(pid)
+            yield session, (lambda rep: make_client({**rep_model_config(model_cfg, rep), "model": session["identifier"]},
+                                                    preflight=check, postflight=post))
+
+    with lmstudio.RotatingSessions(open_session, sc.get("runs_per_session"), cumulative_swap(sc),
+                                   unit="실행") as sessions:
+        _run_jobs(None, model_name, model_cfg, jobs, infos, None, acquire=lambda: (sessions.next(), sessions.meta))
+
+
+def cumulative_swap(sc: dict) -> dict | None:
+    """누적 스왑 기준. baseline_gib가 없으면 오늘 첫 세션 전 스왑 사용량을 runs/<run_name>/swap_baseline.json에 남겨 쓴다."""
+    cum = sc.get("cumulative_swap")
+    if not cum or cum.get("baseline_gib") is not None:
+        return cum
+    from . import lmstudio
+
+    path = runs_dir() / "swap_baseline.json"
+    today = datetime.now().date().isoformat()
+    saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    if not saved or saved.get("date") != today:
+        mem = lmstudio.memory_snapshot()
+        saved = {"date": today, "taken_at": mem["taken_at"], "swap_used_gib": mem["swap_used_gib"],
+                 "note": "오늘 첫 세션 전 스왑 사용량 (누적 스왑 기준점)"}
+        _write_atomic(path, saved)
+        print(f"  누적 스왑 기준점: {saved['swap_used_gib']:.2f} GiB ({saved['taken_at']}) → runs/{path.parent.name}/{path.name}")
+    return {**cum, "baseline_gib": saved["swap_used_gib"], "baseline_at": saved["taken_at"]}
 
 
 def _session_meta(session: dict | None) -> dict | None:
     if not session:
         return None
     keys = ("identifier", "model_key", "loaded_by_us", "load_options", "instance", "runtime", "model_file",
-            "memory_before_load", "memory_after_load", "swap_baseline_gib", "started_at")
+            "memory_before_load", "memory_after_load", "swap_baseline_gib", "started_at", "power_before_load", "engine")
     meta = {k: session.get(k) for k in keys}
     meta["runtime"] = {k: v for k, v in (meta["runtime"] or {}).items() if k != "runtime_ls"}
     return meta
 
 
-def _run_jobs(client_for, model_name, model_cfg, jobs, infos, session) -> None:
-    """client_for(rep): 그 반복에 쓸 클라이언트 (반복별 seed)."""
+def _run_jobs(client_for, model_name, model_cfg, jobs, infos, session, acquire=None) -> None:
+    """client_for(rep): 그 반복에 쓸 클라이언트 (반복별 seed).
+
+    acquire가 있으면 실행마다 acquire() → (client_for, session)을 받는다 (세션 나누기). 기록이 있는 실행은 받지 않는다
+    """
     for _, _, set_id, input_id, rep in jobs:
         path = run_path(model_name, set_id, input_id, rep)
         if path.exists():
             continue
+        if acquire:
+            client_for, session = acquire()
         started = _now()
         try:
             record = extract(client_for(rep), load_input(set_id, input_id))
@@ -296,6 +337,7 @@ def _print_dry_run(todo: list[tuple], manifest: dict) -> None:
         lm_cfg = model_cfg.get("lmstudio")
         if lm_cfg:
             _print_lmstudio_plan(lm_cfg)
+            _print_session_plan(len([j for j in todo if j[0] == model_name]))
     ratio, assoc_extra = _observed_prompt_ratio()
     n_ctx = max(((m.get("lmstudio") or {}).get("context_length", 0) for _, m, *_ in todo), default=0)
     max_tokens = max((m.get("max_tokens") or 0 for _, m, *_ in todo), default=0)
@@ -335,6 +377,36 @@ def _observed_prompt_ratio() -> tuple[float, int]:
     if not ratios:
         return 4.0, 300
     return statistics.median(ratios), max(max(extra, default=300), 0)
+
+
+def _print_session_plan(n_runs: int) -> None:
+    """세션 나누기·공존 규칙·누적 스왑 기준 (읽기만, 기준점 파일도 쓰지 않는다)."""
+    import math
+
+    from . import lmstudio
+
+    sc = experiment_config().get("sessions")
+    if not sc:
+        print("  세션 나누기: 없음 (세션 하나로 끝까지)")
+        return
+    per = sc.get("runs_per_session")
+    print(f"  세션 나누기: 실행 {per}건(호출 최대 {2 * per}회)마다 언로드 → 세션 {math.ceil(n_runs / per)}번")
+    if sc.get("exclusive"):
+        ex = {**sc["exclusive"], "ledger_path": ROOT / sc["exclusive"]["ledger"]}
+        problems = lmstudio.exclusive_problems(ex, lmstudio.loaded_models())
+        print("  공존 규칙 (세션마다 검사, 지금): " + ("통과" if not problems else "미충족 — " + "; ".join(problems)))
+    cum = sc.get("cumulative_swap")
+    if cum:
+        path = runs_dir() / "swap_baseline.json"
+        saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+        today = datetime.now().date().isoformat()
+        base = (cum.get("baseline_gib") if cum.get("baseline_gib") is not None
+                else saved["swap_used_gib"] if saved and saved.get("date") == today else None)
+        now = lmstudio.memory_snapshot()["swap_used_gib"]
+        print(f"  누적 스왑 기준: 기준점 " + (f"{base:.2f} GiB" if base is not None else f"(실행 때 기록, 지금 {now:.2f} GiB)")
+              + f" 대비 +{cum['max_increase_gib']} GiB 초과면 다음 세션을 열지 않는다")
+    exe = lmstudio.engine_executable(lmstudio.runtime_info().get("gguf_engine"))
+    print(f"  엔진 메모리 기록: 호출 직전·직후, 엔진 실행 파일 {exe} ({'있음' if exe and exe.exists() else '없음'})")
 
 
 def _print_lmstudio_plan(lm_cfg: dict) -> None:

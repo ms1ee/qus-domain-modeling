@@ -247,3 +247,83 @@ def test_rerun_record_lists_archived_previous_version(smoke):
                                          "finished_at": "T0", "parallel": 4}]
     assert runmod.plan()  # archive 아래 기록은 완료로 치지 않는다
     assert not runmod.run_path("mistral-7b-local", "school", "original", 2).exists()
+
+
+@pytest.fixture
+def general(tmp_path, monkeypatch):
+    use_config("generalization.yaml")
+    monkeypatch.setattr(runmod, "runs_dir", lambda: tmp_path / "runs" / "generalization")
+    yield tmp_path
+    use_config("experiment.yaml")
+
+
+def _fake_lmstudio(monkeypatch, events, swap=1.0):
+    from contextlib import contextmanager
+
+    from qus import lmstudio
+    n = {"v": 0}
+
+    @contextmanager
+    def fake_smoke(lm_cfg, guard, on_close=None, exclusive=None, ledger=None):
+        n["v"] += 1
+        k = n["v"]
+        events.append(("open", k, bool(exclusive and exclusive["require_empty"])))
+        try:
+            yield {"identifier": lm_cfg["identifier"], "swap_baseline_gib": swap, "started_at": f"s{k}",
+                   "engine": {"pid": 100 + k}}
+        finally:
+            events.append(("close", k))
+    monkeypatch.setattr(lmstudio, "smoke_model", fake_smoke)
+    monkeypatch.setattr(lmstudio, "preflight", lambda ident, guard, base, engine_pid=None: (lambda: {"engine_pid": engine_pid}))
+    monkeypatch.setattr(lmstudio, "postflight", lambda pid: (lambda rid: {"engine_pid_after": pid}))
+    monkeypatch.setattr(lmstudio, "memory_snapshot", lambda: {"swap_used_gib": swap, "taken_at": "t0"})
+
+
+def test_mistral_path_rotates_sessions_every_three_runs(general, monkeypatch):
+    events = []
+    _fake_lmstudio(monkeypatch, events)
+
+    class Fake:
+        n = 0
+
+        def __init__(self, preflight=None, postflight=None):
+            self.preflight, self.postflight = preflight, postflight
+
+        def complete(self, prompt):
+            Fake.n += 1
+            text = '{"classes": ["Camp"]}' if Fake.n % 2 else '{"associations": []}'
+            return LLMResponse(text, "fake", "stop", 1, 1, {}, elapsed_s=0.1, preflight=self.preflight(),
+                               server_info=self.postflight("id"))
+    monkeypatch.setattr(runmod, "make_client", lambda cfg, preflight=None, postflight=None: Fake(preflight, postflight))
+    model = runmod.role_models("extractors")["mistral-7b-local"]
+    jobs = [("mistral-7b-local", model, "camperplus", "original", r) for r in range(1, 8)]
+    infos = {("camperplus", "original"): {}}
+    runmod._run_model("mistral-7b-local", model, jobs, infos)
+    assert [e for e in events if e[0] == "open"] == [("open", 1, True), ("open", 2, True), ("open", 3, True)]
+    assert events[-1] == ("close", 3)
+    recs = [json.loads(runmod.run_path("mistral-7b-local", "camperplus", "original", r).read_text()) for r in range(1, 8)]
+    assert [r["session"]["started_at"] for r in recs] == ["s1"] * 3 + ["s2"] * 3 + ["s3"]
+    assert recs[3]["calls"]["classes"]["response"]["preflight"] == {"engine_pid": 102}  # 엔진 메모리 기록 (B)
+    base = json.loads((runmod.runs_dir() / "swap_baseline.json").read_text())
+    assert base["swap_used_gib"] == 1.0
+    events.clear()
+    runmod._run_model("mistral-7b-local", model, jobs, infos)  # 기록이 다 있으면 로드하지 않는다
+    assert events == []
+
+
+def test_cumulative_swap_stops_before_next_session(general, monkeypatch):
+    from qus import lmstudio
+    events = []
+    _fake_lmstudio(monkeypatch, events, swap=1.0)
+    (runmod.runs_dir()).mkdir(parents=True)
+    from datetime import datetime
+    (runmod.runs_dir() / "swap_baseline.json").write_text(json.dumps(
+        {"date": datetime.now().date().isoformat(), "taken_at": "t", "swap_used_gib": 0.5}))
+    sc = runmod.experiment_config()["sessions"]
+    cum = runmod.cumulative_swap(sc)
+    assert cum["baseline_gib"] == 0.5  # 오늘 기록한 기준점을 다시 쓴다
+    monkeypatch.setattr(lmstudio, "memory_snapshot", lambda: {"swap_used_gib": 2.6, "taken_at": "t1"})
+    with pytest.raises(lmstudio.MemoryPressure, match="누적 스왑"):
+        with lmstudio.RotatingSessions(lambda: lmstudio.smoke_model({"identifier": "x"}, {}), 3, cum, unit="실행") as s:
+            s.next()
+    assert events == []

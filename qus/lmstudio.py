@@ -21,7 +21,7 @@ import re
 import shutil
 import signal
 import subprocess
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -608,3 +608,58 @@ def smoke_model(lm_cfg: dict, guard: dict, on_close=None, exclusive: dict | None
                 signal.signal(s, h)
             if on_close:
                 on_close(session)
+
+
+# --------------------------------------------------------------------------- 세션 나누기
+
+class RotatingSessions:
+    """세션 나누기 (2026-11-09 Qwen, 2026-11-11 Mistral, Jay. 단위당 상한은 DRAFT).
+
+    open_session() → (session, value)를 넘기는 컨텍스트 관리자. 그 세션을 단위(호출·실행) limit번 쓴 뒤 닫고(언로드)
+    다시 연다. 세션은 실제로 쓸 때만 연다. 세션마다 smoke_model이 로드 전 검사(공존 규칙·원장·메모리)·원장 기록·
+    스왑 기준점 재설정을 그대로 한다. 예외가 나면 열린 세션을 그 예외와 함께 닫는다 (언로드). limit이 없으면 세션 하나.
+    cumulative({baseline_gib, max_increase_gib}): 새 세션을 열기 전 기준점 대비 누적 스왑 증가가 상한을 넘으면 열지 않고 멈춘다
+    """
+
+    def __init__(self, open_session, limit: int | None, cumulative: dict | None = None, meta=None, unit: str = "호출"):
+        self._open, self.limit, self.cumulative, self.unit = open_session, limit, cumulative, unit
+        self._meta = meta or (lambda session: session)
+        self._stack, self._inner, self.value = ExitStack(), None, None
+        self.meta, self.number, self.used = None, 0, 0
+
+    def __enter__(self):
+        self._stack.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._stack.__exit__(*exc)
+
+    def next(self):
+        """다음 단위에 쓸 값. 이번 세션의 사용 수가 상한에 닿았으면 언로드하고 새로 로드한다."""
+        if self._inner is None or (self.limit and self.used >= self.limit):
+            self.close()
+            self._check_cumulative()
+            self._inner = self._stack.enter_context(ExitStack())
+            session, self.value = self._inner.enter_context(self._open())
+            self.meta, self.used = self._meta(session), 0
+            self.number += 1
+            print(f"  [세션 {self.number}] {self.unit} 최대 {self.limit or '제한 없음'}회")
+        self.used += 1
+        return self.value
+
+    def _check_cumulative(self) -> None:
+        cum = self.cumulative
+        if not cum:
+            return
+        mem = memory_snapshot()
+        problems = cumulative_swap_problems(mem, cum)
+        if problems:
+            raise MemoryPressure("누적 스왑 기준 초과: " + "; ".join(problems) + ". 다음 세션을 시작하지 않고 멈춘다", mem)
+        print(f"  [세션 {self.number + 1} 전] 스왑 {mem['swap_used_gib']:.2f} GiB, 기준점 {cum['baseline_gib']:.2f} 대비 "
+              f"누적 +{mem['swap_used_gib'] - cum['baseline_gib']:.2f} GiB (상한 {cum['max_increase_gib']})")
+
+    def close(self) -> None:
+        """열린 세션을 정상 종료한다 (언로드·상태 비교·세션 기록)."""
+        if self._inner is not None:
+            self._inner.close()
+            self._inner = None

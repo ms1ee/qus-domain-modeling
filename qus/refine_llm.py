@@ -14,13 +14,13 @@ import hashlib
 import json
 import math
 import re
-from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from itertools import combinations
 from pathlib import Path
 
 from .config import ROOT, load_yaml
+from .lmstudio import RotatingSessions
 from .refine_kg import R1, R2, exact_story_count, refine
 
 CONFIG_FILE = "r3llm.yaml"
@@ -529,7 +529,7 @@ def judge_session(cfg: dict, guard: dict, log_dir: Path):
     return _cm()
 
 
-class SplitSessions:
+class SplitSessions(RotatingSessions):
     """세션 나누기 (2026-11-09 Jay, DRAFT): 판단 모델을 로드 → 호출 최대 calls_per_session회 → 언로드를 반복한다.
 
     세션은 실제로 물어야 할 때만 연다 (기록이 이미 있는 호출은 세지 않는다). 세션마다 judge_session이 로드 전
@@ -539,46 +539,13 @@ class SplitSessions:
     """
 
     def __init__(self, cfg: dict, guard: dict, log_dir: Path, calls_per_session: int | None):
-        self.cfg, self.guard, self.log_dir, self.limit = cfg, guard, log_dir, calls_per_session
-        self._stack, self._inner, self._client = ExitStack(), None, None
-        self.meta, self.number, self.calls = None, 0, 0
+        super().__init__(lambda: judge_session(cfg, guard, log_dir), calls_per_session,
+                         cfg["apply"].get("cumulative_swap"), meta=session_meta, unit="호출")
 
-    def __enter__(self):
-        self._stack.__enter__()
-        return self
-
-    def __exit__(self, *exc):
-        return self._stack.__exit__(*exc)
+    @property
+    def calls(self) -> int:
+        return self.used
 
     def client(self):
         """다음 호출에 쓸 클라이언트. 이번 세션 호출 수가 상한에 닿았으면 언로드하고 새로 로드한다."""
-        if self._inner is None or (self.limit and self.calls >= self.limit):
-            self.close()
-            self._check_cumulative_swap()
-            self._inner = self._stack.enter_context(ExitStack())
-            session, self._client = self._inner.enter_context(judge_session(self.cfg, self.guard, self.log_dir))
-            self.meta, self.calls = session_meta(session), 0
-            self.number += 1
-            print(f"  [세션 {self.number}] 호출 최대 {self.limit or '제한 없음'}회")
-        self.calls += 1
-        return self._client
-
-    def _check_cumulative_swap(self) -> None:
-        from . import lmstudio
-
-        cum = self.cfg["apply"].get("cumulative_swap")
-        if not cum:
-            return
-        mem = lmstudio.memory_snapshot()
-        problems = lmstudio.cumulative_swap_problems(mem, cum)
-        if problems:
-            raise lmstudio.MemoryPressure("누적 스왑 기준 초과: " + "; ".join(problems)
-                                          + ". 다음 세션을 시작하지 않고 멈춘다", mem)
-        print(f"  [세션 {self.number + 1} 전] 스왑 {mem['swap_used_gib']:.2f} GiB, 기준점 {cum['baseline_gib']:.2f} 대비 "
-              f"누적 +{mem['swap_used_gib'] - cum['baseline_gib']:.2f} GiB (상한 {cum['max_increase_gib']})")
-
-    def close(self) -> None:
-        """열린 세션을 정상 종료한다 (언로드·상태 비교·세션 기록)."""
-        if self._inner is not None:
-            self._inner.close()
-            self._inner = None
+        return self.next()

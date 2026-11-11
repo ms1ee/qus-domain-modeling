@@ -161,7 +161,7 @@ def test_refine_llm_code_does_not_reference_injection_or_gold():
     import re
     strings, imports = _code_strings_and_imports(RL.__file__)
     assert set(imports) <= {"hashlib", "json", "math", "re", "dataclasses", "datetime", "itertools", "pathlib",
-                            "contextlib", "config", "refine_kg", "", "llm"}
+                            "contextlib", "config", "refine_kg", "", "llm", "lmstudio"}
     assert not [s for s in strings if any(f in s.lower() for f in FORBIDDEN_LLM) or re.search(r"seed\d*\.jsonl", s)]
 
 
