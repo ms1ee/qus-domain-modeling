@@ -5,6 +5,7 @@ import pytest
 
 from qus import kg_preanalysis as K
 from qus import kg_preanalysis_eval as E
+from qus.config import CONFIG_DIR
 from test_refine_kg import FORBIDDEN, _code_strings_and_imports
 
 SEG = [{"idx": 1, "segments": {"role": "a teacher", "means": "view the grade of a student", "ends": "know"}},
@@ -99,3 +100,23 @@ def test_freeze_refuses_to_overwrite(tmp_path):
     p.write_text("{}")
     with pytest.raises(FileExistsError):
         E.freeze_kg_conf(p)
+
+
+def test_kg_conf_file_holds_v1_and_v1_n3_with_thresholds(tmp_path):
+    v1, n3 = K.load_kg_conf(), K.load_kg_conf(name="kg-conf-v1-n3")
+    assert v1["name"] == "kg-conf-v1" and n3["name"] == "kg-conf-v1-n3"
+    assert 0 < v1["threshold"] < 1 and 0 < n3["threshold"] < 1
+    assert n3["trained_on"]["subsample"]["n"] == 3 and n3["trained_on"]["set"] == "school"
+    with pytest.raises(FileExistsError):
+        E.freeze_kg_conf_n3(CONFIG_DIR / "kg_conf_v1.json")  # 이미 models가 있으면 멈춘다
+
+
+def test_choose_threshold_takes_smallest_maximum():
+    class M:
+        classes = {"a", "b"}
+
+        def map_term(self, t):
+            return t
+    rows = [{"names": {"a": 1}}, {"names": {"b": 1}}, {"names": {"c": 1}}]
+    out = E.choose_threshold([(rows, [0.9, 0.6, 0.3], M())])
+    assert out["threshold"] == 0.31 and out["school_mean_f1"] == 1.0  # 0.31–0.60에서 F1 1.0, 작은 값

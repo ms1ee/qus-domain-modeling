@@ -305,3 +305,88 @@ def freeze_kg_conf(path=None) -> dict:
     path.write_text(json.dumps(out, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     print(f"→ {path.relative_to(ROOT)} (n_rows {len(rows)}, 양성 {out['trained_on']['n_pos']})")
     return out
+
+
+THRESHOLD_GRID = [round(0.01 * i, 2) for i in range(1, 100)]
+
+
+def _selected_f1(groups: list[tuple], t: float) -> float:
+    """groups: [(행 목록, 점수 목록, Matcher)] → 점수 ≥ t인 노드(가장 많이 나온 표기)로 만든 클래스 목록의 평균 F1."""
+    from .score import score_classes
+
+    f1s = []
+    for rows, scores, m in groups:
+        names = [max(r["names"].items(), key=lambda kv: kv[1])[0] for r, s in zip(rows, scores) if s >= t]
+        f1s.append(score_classes(names, m)["f1"])
+    return sum(f1s) / len(f1s)
+
+
+def choose_threshold(groups: list[tuple]) -> dict:
+    """School 평균 클래스 F1이 최대인 임계값 (0.01–0.99, 0.01 간격, 같으면 작은 값)."""
+    curve = {t: _selected_f1(groups, t) for t in THRESHOLD_GRID}
+    best = max(curve.values())
+    t = min(t for t, v in curve.items() if v == best)
+    return {"threshold": t, "school_mean_f1": best, "curve": curve}
+
+
+def freeze_kg_conf_n3(path=None) -> dict:
+    """kg-conf-v1-n3 (School 스모크 n=3 부분 표본 100번으로 학습)과 v1·v1-n3 임계값을 같은 파일에 고정한다 (2026-11-11 Jay).
+
+    v1의 가중치는 그대로 두고, 파일을 models 구조로 옮긴다. 이미 v1-n3가 있으면 멈춘다. 다른 세트에서 재학습·재조정하지 않는다
+    """
+    import hashlib
+    from datetime import datetime, timezone
+
+    from .config import CONFIG_DIR
+
+    path = path or CONFIG_DIR / KG_CONF_FILE
+    old_bytes = path.read_bytes()
+    old = json.loads(old_bytes)
+    if "models" in old:
+        raise FileExistsError(f"{path.name}에 이미 models(v1-n3 포함)가 있다. 덮어쓰지 않는다")
+    v1 = {k: v for k, v in old.items() if k not in ("status", "note")}
+    exp, rules, cfg = experiment_config(), load_rules(), K.load_config()
+    gold, fixes = load_gold(), load_yaml("gold_fixes.yaml")
+    data = load_inputs(exp, rules, gold, fixes)
+    inputs, sub, l2 = cfg["prediction"]["inputs"], cfg["prediction"]["subsample"], cfg["prediction"]["model"]["l2"]
+    if {data[i]["set"] for i in inputs} != {"school"} or v1["features"] != list(K.FEATURES_B):
+        raise ValueError("School 스모크·같은 특징에서만 고정한다")
+    # v1 임계값: 입력 10개 × 실행 10회
+    g10 = []
+    for i in inputs:
+        rows = labeled_rows(data[i]["runs"], data[i]["ks"], data[i]["matcher"])
+        g10.append((rows, K.kg_conf_scores(v1, rows), data[i]["matcher"]))
+    th10 = choose_threshold(g10)
+    # v1-n3 학습 표본: 반복마다 입력별 실행 3회 비복원 추출 (prediction()과 같은 seed 규칙)
+    n, samples = 3, []
+    for rep in range(sub["repeats"]):
+        rng = random.Random(f"{sub['seed']}:{n}:{rep}")
+        for i in inputs:
+            runs = data[i]["runs"]
+            idx = sorted(rng.sample(range(len(runs)), n))
+            samples.append((labeled_rows([runs[j] for j in idx], data[i]["ks"], data[i]["matcher"]), data[i]["matcher"]))
+    train = [r for rows, _ in samples for r in rows]
+    model = K.fit_logistic([[r[f] for f in K.FEATURES_B] for r in train], [r["gold"] for r in train], l2=l2)
+    n3 = {"name": "kg-conf-v1-n3", "features": list(K.FEATURES_B), "intercept_first": True,
+          "w": model["w"], "mu": model["mu"], "sd": model["sd"], "l2": l2,
+          "standardized_coefficients": {"intercept": model["w"][0], **dict(zip(K.FEATURES_B, model["w"][1:]))},
+          "trained_on": {**{k: v for k, v in v1["trained_on"].items() if k not in ("runs_per_input", "n_rows", "n_pos", "rows_sha256")},
+                         "subsample": {"n": n, "repeats": sub["repeats"], "seed": sub["seed"],
+                                       "rule": "반복 r마다 Random(f'{seed}:{n}:{r}')로 입력 순서대로 실행 3회 비복원 추출"},
+                         "n_rows": len(train), "n_pos": sum(r["gold"] for r in train)}}
+    th3 = choose_threshold([(rows, K.kg_conf_scores(n3, rows), m) for rows, m in samples])
+    v1["threshold"], n3["threshold"] = th10["threshold"], th3["threshold"]
+    out = {"status": "frozen",
+           "note": "School 스모크 실행으로만 학습·임계값 결정. 다른 세트에서 재학습·재조정 금지 (SWE_prj notes/decisions.md 2026-11-11)",
+           "models": {"kg-conf-v1": v1, "kg-conf-v1-n3": n3},
+           "threshold_selection": {"grid": "0.01–0.99, 0.01 간격", "criterion": "School 평균 클래스 F1 최대 (같으면 작은 값)",
+                                   "selected_names": "점수 ≥ 임계값인 노드의 가장 많이 나온 표기",
+                                   "kg-conf-v1": {"groups": "입력 10개 × 실행 10회", **th10},
+                                   "kg-conf-v1-n3": {"groups": f"{sub['repeats']}번 × 입력 10개 × 실행 3회 (학습 표본과 같다)", **th3}},
+           "history": [{"at": datetime.now(timezone.utc).isoformat(),
+                        "change": "v1 단일 파일을 models 구조로 옮기고 v1 임계값과 kg-conf-v1-n3를 추가 (v1 가중치는 그대로)",
+                        "previous_sha256": hashlib.sha256(old_bytes).hexdigest()}]}
+    path.write_text(json.dumps(out, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    print(f"→ {path.relative_to(ROOT)}: v1 임계값 {th10['threshold']} (F1 {th10['school_mean_f1']:.3f}), "
+          f"v1-n3 행 {len(train)} 임계값 {th3['threshold']} (F1 {th3['school_mean_f1']:.3f})")
+    return out

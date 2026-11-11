@@ -211,15 +211,16 @@ def spearman(xs: list[float], ys: list[float]) -> float | None:
     return sxy / math.sqrt(sxx * syy) if sxx and syy else None
 
 
-def load_kg_conf(path=None) -> dict:
-    """고정된 신뢰도 모델 kg-conf-v1 (config/kg_conf_v1.json). 학습하지 않고 읽기만 한다."""
+def load_kg_conf(path=None, name: str = "kg-conf-v1") -> dict:
+    """고정된 신뢰도 모델 (config/kg_conf_v1.json의 kg-conf-v1 또는 kg-conf-v1-n3). 학습하지 않고 읽기만 한다."""
     import json
 
     from .config import CONFIG_DIR
 
-    model = json.loads((path or CONFIG_DIR / "kg_conf_v1.json").read_text(encoding="utf-8"))
-    if model.get("status") != "frozen" or model["features"] != list(FEATURES_B):
-        raise ValueError("kg-conf-v1 파일의 상태나 특징 목록이 지금 코드와 다르다")
+    data = json.loads((path or CONFIG_DIR / "kg_conf_v1.json").read_text(encoding="utf-8"))
+    model = data["models"][name] if "models" in data else (data if name == "kg-conf-v1" else None)
+    if data.get("status") != "frozen" or not model or model["features"] != list(FEATURES_B):
+        raise ValueError(f"{name}: 파일의 상태나 특징 목록이 지금 코드와 다르다")
     return model
 
 
