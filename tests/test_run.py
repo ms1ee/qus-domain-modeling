@@ -253,6 +253,7 @@ def test_rerun_record_lists_archived_previous_version(smoke):
 def general(tmp_path, monkeypatch):
     use_config("generalization.yaml")
     monkeypatch.setattr(runmod, "runs_dir", lambda: tmp_path / "runs" / "generalization")
+    monkeypatch.setattr(runmod, "swap_baseline_path", lambda: tmp_path / "runs" / "swap_baseline.json")
     yield tmp_path
     use_config("experiment.yaml")
 
@@ -304,7 +305,7 @@ def test_mistral_path_rotates_sessions_every_three_runs(general, monkeypatch):
     recs = [json.loads(runmod.run_path("mistral-7b-local", "camperplus", "original", r).read_text()) for r in range(1, 8)]
     assert [r["session"]["started_at"] for r in recs] == ["s1"] * 3 + ["s2"] * 3 + ["s3"]
     assert recs[3]["calls"]["classes"]["response"]["preflight"] == {"engine_pid": 102}  # 엔진 메모리 기록 (B)
-    base = json.loads((runmod.runs_dir() / "swap_baseline.json").read_text())
+    base = json.loads(runmod.swap_baseline_path().read_text())
     assert base["swap_used_gib"] == 1.0
     events.clear()
     runmod._run_model("mistral-7b-local", model, jobs, infos)  # 기록이 다 있으면 로드하지 않는다
@@ -315,9 +316,9 @@ def test_cumulative_swap_stops_before_next_session(general, monkeypatch):
     from qus import lmstudio
     events = []
     _fake_lmstudio(monkeypatch, events, swap=1.0)
-    (runmod.runs_dir()).mkdir(parents=True)
+    runmod.swap_baseline_path().parent.mkdir(parents=True)
     from datetime import datetime
-    (runmod.runs_dir() / "swap_baseline.json").write_text(json.dumps(
+    runmod.swap_baseline_path().write_text(json.dumps(
         {"date": datetime.now().date().isoformat(), "taken_at": "t", "swap_used_gib": 0.5}))
     sc = runmod.experiment_config()["sessions"]
     cum = runmod.cumulative_swap(sc)

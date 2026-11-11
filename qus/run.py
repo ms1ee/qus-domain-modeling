@@ -197,14 +197,19 @@ def _run_model(model_name: str, model_cfg: dict, jobs: list[tuple], infos: dict)
         _run_jobs(None, model_name, model_cfg, jobs, infos, None, acquire=lambda: (sessions.next(), sessions.meta))
 
 
+def swap_baseline_path():
+    """오늘 첫 세션 전 스왑 기록. 실행 묶음(run_name) 사이에 같이 쓴다 (2026-11-11)."""
+    return ROOT / "runs" / "swap_baseline.json"
+
+
 def cumulative_swap(sc: dict) -> dict | None:
-    """누적 스왑 기준. baseline_gib가 없으면 오늘 첫 세션 전 스왑 사용량을 runs/<run_name>/swap_baseline.json에 남겨 쓴다."""
+    """누적 스왑 기준. baseline_gib가 없으면 오늘 첫 세션 전 스왑 사용량을 runs/swap_baseline.json에 남겨 쓴다."""
     cum = sc.get("cumulative_swap")
     if not cum or cum.get("baseline_gib") is not None:
         return cum
     from . import lmstudio
 
-    path = runs_dir() / "swap_baseline.json"
+    path = swap_baseline_path()
     today = datetime.now().date().isoformat()
     saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
     if not saved or saved.get("date") != today:
@@ -212,7 +217,7 @@ def cumulative_swap(sc: dict) -> dict | None:
         saved = {"date": today, "taken_at": mem["taken_at"], "swap_used_gib": mem["swap_used_gib"],
                  "note": "오늘 첫 세션 전 스왑 사용량 (누적 스왑 기준점)"}
         _write_atomic(path, saved)
-        print(f"  누적 스왑 기준점: {saved['swap_used_gib']:.2f} GiB ({saved['taken_at']}) → runs/{path.parent.name}/{path.name}")
+        print(f"  누적 스왑 기준점: {saved['swap_used_gib']:.2f} GiB ({saved['taken_at']}) → {path.name}")
     return {**cum, "baseline_gib": saved["swap_used_gib"], "baseline_at": saved["taken_at"]}
 
 
@@ -397,7 +402,7 @@ def _print_session_plan(n_runs: int) -> None:
         print("  공존 규칙 (세션마다 검사, 지금): " + ("통과" if not problems else "미충족 — " + "; ".join(problems)))
     cum = sc.get("cumulative_swap")
     if cum:
-        path = runs_dir() / "swap_baseline.json"
+        path = swap_baseline_path()
         saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
         today = datetime.now().date().isoformat()
         base = (cum.get("baseline_gib") if cum.get("baseline_gib") is not None
