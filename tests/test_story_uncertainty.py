@@ -43,3 +43,17 @@ def test_precision_at_k_counts_boundary_ties_by_expectation():
     assert E.precision_at_k(scores, {1, 2}, 0) is None
     m = E._metrics({1: 1.0, 2: 0.0, 3: 0.0}, {1, 2, 3})
     assert m["auc"] is None and m["p_at_k"] == 1.0  # 전부 결함이면 AUC 없음
+
+
+def test_stratified_auc_compares_only_pairs_within_the_same_bin():
+    scores = {1: 0.9, 2: 0.1, 3: 0.2, 4: 0.8, 5: 0.5}
+    strata = {1: "a", 2: "a", 3: "b", 4: "b", 5: "c"}
+    out = E.stratified_auc(scores, {1, 3}, strata)
+    assert out["per_bin"]["a"]["auc"] == 1.0 and out["per_bin"]["b"]["auc"] == 0.0 and out["per_bin"]["c"]["auc"] is None
+    assert out["stratified_auc"] == 0.5 and out["pairs"] == 2
+
+
+def test_quantile_and_describe():
+    assert E._quantile([1, 2, 3, 4], 0.5) == 2.5 and E._quantile([5], 0.9) == 5
+    d = E._describe([1.0, 3.0])
+    assert (d["n"], d["mean"], d["min"], d["max"]) == (2, 2.0, 1.0, 3.0) and E._describe([]) == {"n": 0}

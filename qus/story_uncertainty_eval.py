@@ -155,3 +155,111 @@ def markdown(out: dict) -> list[str]:
             tt = o["top_ties"][u]
             L += ["", f"- 마지막 순위 점수 {_f(tt['score'])}와 같은 점수의 스토리 {tt['n_equal']}개, 그중 목록 밖 {tt['outside']}개", ""]
     return L
+
+
+# --------------------------------------------------------------------------- 교란 확인 (2026-11-11 Jay)
+
+CONFOUND_INPUTS = ("unambiguous", "unambiguous@50")
+
+
+def _quantile(xs: list[float], q: float) -> float:
+    """선형 보간 분위수 (xs는 비어 있지 않다)."""
+    xs = sorted(xs)
+    pos = (len(xs) - 1) * q
+    lo = int(pos)
+    return xs[lo] + (xs[min(lo + 1, len(xs) - 1)] - xs[lo]) * (pos - lo)
+
+
+def _describe(xs: list[float]) -> dict:
+    if not xs:
+        return {"n": 0}
+    return {"n": len(xs), "mean": sum(xs) / len(xs), "q1": _quantile(xs, 0.25), "median": _quantile(xs, 0.5),
+            "q3": _quantile(xs, 0.75), "min": min(xs), "max": max(xs)}
+
+
+def stratified_auc(scores: dict[int, float], gold: set, strata: dict[int, str]) -> dict:
+    """같은 구간 안의 (결함, 비결함) 쌍만 비교한 AUC와 구간별 AUC."""
+    per, num, den = {}, 0.0, 0
+    for b in sorted(set(strata.values())):
+        ids = [s for s in scores if strata[s] == b]
+        pos, neg = sum(s in gold for s in ids), sum(s not in gold for s in ids)
+        a = auc([scores[s] for s in ids], [int(s in gold) for s in ids])
+        per[b] = {"n_defect": pos, "n_clean": neg, "auc": a}
+        if a is not None:
+            num += a * pos * neg
+            den += pos * neg
+    return {"per_bin": per, "stratified_auc": num / den if den else None, "pairs": den}
+
+
+def confound() -> dict:
+    """unambiguous 입력: 결함·비결함 스토리의 "연결된 정답 클래스의 원본 근거 스토리 수" 분포와, 그 값으로 층화한 U1 AUC.
+
+    - 연결된 정답 클래스: 원본 스토리 s에 이름 키가 완전 일치한 정답 클래스
+    - 스토리 값: 연결된 정답 클래스들의 원본 근거 스토리 수(완전 일치 스토리 수) 평균. 연결이 없으면 "없음" 구간
+    - 층화 구간: 연결이 있는 스토리 값의 삼분위(라벨을 보지 않고 자름) + "없음"
+    """
+    from .data import load_gold, load_stories
+    from .refine_kg import class_key, segment_stories
+
+    exp, rules, cfg = experiment_config(), load_rules(), SU.load_config()
+    data = load_runs(exp, rules)
+    set_id = next(iter(data.values()))["set"]
+    ks0 = KeyStories(segment_stories(load_stories(set_id), rules["segmentation"]))
+    gold_names = sorted({c["name"] for c in load_gold()[set_id]["classes"]})
+    evidence = {g: ks0.stories(class_key(g)) for g in gold_names}
+    sc = cfg["scores"]
+    out = {"set": set_id, "evidence": {g: len(v) for g, v in evidence.items()}, "inputs": {}}
+    for i in CONFOUND_INPUTS:
+        d = data[i]
+        ids = [s.idx for s in d["stories"]]
+        u1 = {s: v["U1"] for s, v in SU.story_scores(d["runs"], d["ks"], ids, tuple(sc["low_count"]),
+                                                    sc["missing_score"]).items()}
+        gold = defect_stories(set_id, i, exp["seed"])
+        linked = {s: [g for g in gold_names if s in evidence[g]] for s in ids}
+        value = {s: (sum(len(evidence[g]) for g in linked[s]) / len(linked[s]) if linked[s] else None) for s in ids}
+        vals = [value[s] for s in ids if value[s] is not None]
+        t1, t2 = _quantile(vals, 1 / 3), _quantile(vals, 2 / 3)
+        strata = {s: ("없음" if value[s] is None else f"1: ≤{t1:.2f}" if value[s] <= t1
+                      else f"2: ({t1:.2f}, {t2:.2f}]" if value[s] <= t2 else f"3: >{t2:.2f}") for s in ids}
+        groups = {"defect": [s for s in ids if s in gold], "clean": [s for s in ids if s not in gold]}
+        out["inputs"][i] = {
+            "n_stories": len(ids), "n_defect": len(gold), "cuts": [t1, t2],
+            "distribution": {k: {**_describe([value[s] for s in g if value[s] is not None]),
+                                 "n_no_link": sum(value[s] is None for s in g),
+                                 "linked_gold_mean": sum(len(linked[s]) for s in g) / len(g) if g else None}
+                             for k, g in groups.items()},
+            "bin_counts": {b: {"defect": sum(strata[s] == b for s in groups["defect"]),
+                               "clean": sum(strata[s] == b for s in groups["clean"])} for b in sorted(set(strata.values()))},
+            "u1_auc": auc([u1[s] for s in ids], [int(s in gold) for s in ids]),
+            "u1_stratified": stratified_auc(u1, gold, strata),
+            "stories": {s: {"defect": s in gold, "linked_gold": linked[s], "value": value[s], "bin": strata[s], "U1": u1[s]}
+                        for s in ids}}
+    base = RESULTS / f"story_uncertainty_confound_{set_id}"
+    base.with_suffix(".json").write_text(json.dumps(out, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    base.with_suffix(".md").write_text("\n".join(confound_markdown(out)) + "\n", encoding="utf-8")
+    print(f"→ {base.with_suffix('.md').relative_to(ROOT)}, {base.with_suffix('.json').relative_to(ROOT)}")
+    return out
+
+
+def confound_markdown(out: dict) -> list[str]:
+    L = [f"# 교란 확인: unambiguous의 근거 스토리 수와 U1 — {out['set']} (탐색적, DRAFT, 숫자만, 모델 호출 없음)", "",
+         "- 연결된 정답 클래스: 원본 스토리 s에 정답 클래스 이름 키가 완전 일치",
+         "- 스토리 값: 연결된 정답 클래스들의 원본 근거 스토리 수(완전 일치 스토리 수) 평균. 연결이 없으면 \"없음\"",
+         "- 층화: 연결이 있는 스토리 값의 삼분위로 3구간(라벨을 보지 않고 자름) + \"없음\". "
+         "층화 AUC = 같은 구간 안의 (결함, 비결함) 쌍만 비교", ""]
+    for i, r in out["inputs"].items():
+        L += [f"## {i} (결함 {r['n_defect']} / {r['n_stories']})", "",
+              "| 그룹 | 연결 있음 | 연결 없음 | 평균 | Q1 | 중앙값 | Q3 | 최소 | 최대 | 연결 정답 클래스 수 평균 |",
+              "|---|---|---|---|---|---|---|---|---|---|"]
+        for k, label in (("defect", "결함"), ("clean", "비결함")):
+            d = r["distribution"][k]
+            L.append(f"| {label} | {d['n']} | {d['n_no_link']} | {_f(d.get('mean'), 2)} | {_f(d.get('q1'), 2)} "
+                     f"| {_f(d.get('median'), 2)} | {_f(d.get('q3'), 2)} | {_f(d.get('min'), 2)} | {_f(d.get('max'), 2)} "
+                     f"| {_f(d['linked_gold_mean'], 2)} |")
+        st = r["u1_stratified"]
+        L += ["", f"- U1 AUC: 전체 {_f(r['u1_auc'])}, 층화 {_f(st['stratified_auc'])} (같은 구간 쌍 {st['pairs']}개)", "",
+              "| 구간 (스토리 값) | 결함 | 비결함 | U1 AUC |", "|---|---|---|---|"]
+        for b, v in st["per_bin"].items():
+            L.append(f"| {b} | {v['n_defect']} | {v['n_clean']} | {_f(v['auc'])} |")
+        L += [""]
+    return L
