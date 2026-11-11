@@ -16,9 +16,14 @@ def gold_path() -> Path:
     return BENCHMARK_DIR / "gold" / experiment_config().get("gold_file", "gold.json")
 
 
-def read_story_file(path, encoding: str = "utf-8-sig") -> list[Story]:
-    # camperplus.txt는 UTF-8 BOM으로 시작한다. Zenodo planningpoker.txt는 cp1252다 (0x92 6개)
-    lines = Path(path).read_text(encoding=encoding).splitlines()
+def story_encoding(path) -> str:
+    """스토리 파일 인코딩: 설정 story_encodings[파일 이름(확장자 제외)]가 있으면 그것, 없으면 utf-8-sig."""
+    return (experiment_config().get("story_encodings") or {}).get(Path(path).stem, "utf-8-sig")
+
+
+def read_story_file(path, encoding: str | None = None) -> list[Story]:
+    # camperplus.txt는 UTF-8 BOM으로 시작한다. Zenodo planningpoker.txt는 cp1252다 (0x92 6개). 파일은 원본 그대로 두고 읽을 때 정한다
+    lines = Path(path).read_text(encoding=encoding or story_encoding(path)).splitlines()
     return [Story(i, line.strip()) for i, line in enumerate(lines, start=1) if line.strip()]
 
 

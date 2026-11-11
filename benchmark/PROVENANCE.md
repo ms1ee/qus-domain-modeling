@@ -58,3 +58,17 @@
 school은 정규화(단수화)만으로 모든 끝점이 클래스에 연결된다. 별칭과 제외 항목이 없다.
 
 참고: camperplus의 `parentguardian`은 스토리에 그대로 나오지 않는다(스토리에는 "parent", "parent/guardian"). 채점할 때 예측 이름의 별칭 처리가 필요하다.
+
+## 추가: 검증 세트 4개 (2026-11-11)
+
+kg-rank-v1 판정용 검증 세트(`config/validation.yaml`). 원본 `A Benchmark for Domain Model/User Stories/`에서 복사만 했고(바이트 단위로 같음, 2026-11-11 확인), 파일 이름만 소문자로 바꿨다 (`Fish_Chips.txt` → `fish_chips.txt`). 사본 출처: SWE_prj `data/benchmark/REJ-main` (Zenodo 10.5281/zenodo.15223349 v1 압축 해제본).
+
+```
+d6ed41f7a4d43ab6ec0e5bd032f8fbcef74d9a715e31d96bea01675617ffde8e  stories/fish_chips.txt
+ab9216707a782672c25ffecd92123fba64eadddf19203e5f99508bac93624284  stories/planningpoker.txt
+8513ff6abb4a73f0c8eacae6908323d32337e1eceec7e9012b86905e9e05a4de  stories/recycling.txt
+ade601576f9298fc1e78d017027967e31f131a0e32aac99039bdeeac7c84c425  stories/sports.txt
+```
+
+- `planningpoker.txt`는 UTF-8이 아니라 cp1252다 (0x92 6개). 파일은 그대로 두고 설정 `story_encodings`로 읽는다
+- 정답은 `gold/gold_validation.json` (`python -m qus --config validation.yaml prepare`). 클래스에 연결되지 않는 정답 관계 끝점은 별칭을 짓지 않고 `unresolved_associations`에 목록만 남겼다 (fish_chips 5개, sports 5개 관계)

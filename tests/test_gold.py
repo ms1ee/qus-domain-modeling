@@ -81,3 +81,29 @@ def test_smoke_config_uses_its_own_gold_file():
     finally:
         use_config("experiment.yaml")
     assert config_name() == "experiment.yaml"
+
+
+def test_story_encoding_comes_from_config(tmp_path, monkeypatch):
+    from qus import data
+    p = tmp_path / "planningpoker.txt"
+    p.write_bytes("As a user, I want the moderator’s view, so that ok.\n".encode("cp1252"))  # ’ → 0x92
+    monkeypatch.setattr(data, "experiment_config", lambda: {"story_encodings": {"planningpoker": "cp1252"}})
+    assert data.read_story_file(p)[0].text.endswith("moderator’s view, so that ok.")
+    monkeypatch.setattr(data, "experiment_config", lambda: {})
+    import pytest
+    with pytest.raises(UnicodeDecodeError):
+        data.read_story_file(p)
+
+
+def test_unresolved_endpoints_are_listed_not_aliased(monkeypatch):
+    from qus import prepare as P
+    monkeypatch.setattr(P, "read_gold_classes", lambda sheet: ["Order", "Products"])
+    monkeypatch.setattr(P, "read_gold_associations", lambda sheet: [("order", "products"), ("customer", "order")])
+    monkeypatch.setattr(P, "_story_vocabulary", lambda set_id: " order product ")
+    import pytest
+    with pytest.raises(P.GoldError):
+        P.build_set("x", "X", {}, strict=True)
+    g, notes = P.build_set("x", "X", {}, strict=False)
+    assert [a["pair"] for a in g["associations"]] == [["order", "product"]]
+    assert g["unresolved_associations"] == [{"original": ["customer", "order"], "missing": ["customer"]}]
+    assert any(n.startswith("unresolved") for n in notes)
