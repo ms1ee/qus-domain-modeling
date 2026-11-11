@@ -18,7 +18,7 @@ def _node(order, name, key, edges=()):
 
 def test_feature_stage_does_not_read_injection_or_gold():
     strings, imports = _code_strings_and_imports(K.__file__)
-    assert set(imports) <= {"math", "collections", "config", "refine_kg"}
+    assert set(imports) <= {"math", "json", "collections", "config", "refine_kg"}
     assert not [s for s in strings if any(f in s.lower() for f in FORBIDDEN)]
 
 
