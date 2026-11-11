@@ -28,6 +28,7 @@ def main() -> None:
     sc.add_argument("--partial", action="store_true", help="적용이 끝난 실행만 채점 (진행 중 확인용)")
     sub.add_parser("story-uncertainty-confound", help="unambiguous 교란 확인: 근거 스토리 수 분포와 층화 U1 AUC (모델 호출 없음)")
     sub.add_parser("story-uncertainty", help="스토리별 구조 불확실성 (DRAFT, 탐색적, 모델 호출 없음) → results/story_uncertainty_<세트>")
+    sub.add_parser("generalization-score", help="일반화 검증 채점 (다수결·kg-conf, R1) → results/generalization (--config generalization.yaml)")
     sub.add_parser("kg-conf-freeze-n3", help="kg-conf-v1-n3와 v1·v1-n3 임계값을 config/kg_conf_v1.json에 고정 (있으면 멈춤)")
     sub.add_parser("kg-conf-freeze", help="School 신뢰도 모델 kg-conf-v1을 config/kg_conf_v1.json에 고정 (있으면 멈춤)")
     sub.add_parser("kg-preanalysis", help="출처 KG 예비 분석 (DRAFT, 모델 호출 없음) → results/kg_preanalysis_<세트>")
@@ -118,6 +119,10 @@ def main() -> None:
         from .story_uncertainty_eval import evaluate as story_uncertainty
 
         story_uncertainty()
+    elif args.command == "generalization-score":
+        from .generalization_eval import evaluate as generalization_score
+
+        generalization_score()
     elif args.command == "kg-conf-freeze-n3":
         from .kg_preanalysis_eval import freeze_kg_conf_n3
 
