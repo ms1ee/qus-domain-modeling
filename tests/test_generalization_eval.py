@@ -41,3 +41,21 @@ def test_sign_test_exact():
 def test_summary_mean_sd_skips_none():
     out = G._summ([{"f1": 0.5, "auc": None}, {"f1": 0.7, "auc": 0.6}], ("f1", "auc"))
     assert abs(out["f1"]["mean"] - 0.6) < 1e-12 and out["auc"] == {"mean": 0.6, "sd": None}
+
+
+def _set(n3_rank, n3_maj, n10_rank, n10_maj):
+    m = lambda x: {"mean": x, "sd": 0.0}  # noqa: E731
+    return {"n3": {"kg_rank": {"f1": m(n3_rank)}, "majority": {"f1": m(n3_maj)}},
+            "n10": {"kg_rank": {"f1": n10_rank}, "majority": {"f1": n10_maj}}}
+
+
+def test_decision_counts_and_preregistered_verdict_labels():
+    sets = {"a": _set(0.6, 0.5, 0.7, 0.55), "b": _set(0.5, 0.5, 0.6, 0.5), "c": _set(0.7, 0.6, 0.5, 0.6),
+            "d": _set(0.4, 0.3, 0.6, 0.5)}
+    d = G.decision(sets, judged=True)
+    assert d["counts"] == {"A_n3_rank_ge_n10_majority": 3, "B_rank_gt_majority_n3": 3, "B_rank_gt_majority_n10": 3}
+    assert d["per_set"]["B_n3"]["b"] is False  # 같으면 ">"가 아니다
+    assert d["verdict"] == {"A_n3_rank_ge_n10_majority": "약한 지지", "B_rank_gt_majority_n3": "약한 지지",
+                            "B_rank_gt_majority_n10": "약한 지지"}
+    assert G.verdict_label(4, 4) == "지지" and G.verdict_label(2, 4) == "지지하지 않음" and G.verdict_label(5, 8) is None
+    assert set(G.decision(sets, judged=False)["verdict"].values()) == {None}  # 판정 대상이 아니면 이름을 붙이지 않는다

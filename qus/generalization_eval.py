@@ -108,15 +108,30 @@ def sign_test(diffs: list[float]) -> dict:
             "p_one_sided": upper, "p_two_sided": min(1.0, 2 * min(upper, lower))}
 
 
-def decision(sets: dict) -> dict:
-    """사전 고정 판정 기준 (config/kg_rank_v1.yaml decision)."""
+def verdict_label(count: int, n_sets: int) -> str | None:
+    """사전 고정 판정 규칙 (검증 4세트): 4/4 지지, 3/4 약한 지지, 2/4 이하 지지하지 않음. 4세트가 아니면 없음."""
+    if n_sets != 4:
+        return None
+    return "지지" if count == 4 else "약한 지지" if count == 3 else "지지하지 않음"
+
+
+def decision(sets: dict, judged: bool) -> dict:
+    """사전 고정 판정 기준 (config/kg_rank_v1.yaml decision). judged가 아니면 세트 수만 세고 판정 이름은 붙이지 않는다."""
     rows = {s: v for s, v in sets.items() if v}
     n3_rank = {s: v["n3"]["kg_rank"]["f1"]["mean"] for s, v in rows.items()}
+    n3_maj = {s: v["n3"]["majority"]["f1"]["mean"] for s, v in rows.items()}
+    n10_rank = {s: v["n10"]["kg_rank"]["f1"] for s, v in rows.items()}
     n10_maj = {s: v["n10"]["majority"]["f1"] for s, v in rows.items()}
-    diff3 = {s: n3_rank[s] - v["n3"]["majority"]["f1"]["mean"] for s, v in rows.items()}
-    diff10 = {s: v["n10"]["kg_rank"]["f1"] - n10_maj[s] for s, v in rows.items()}
-    return {"n3_rank_ge_n10_majority": {s: n3_rank[s] >= n10_maj[s] for s in rows},
-            "count_n3_rank_ge_n10_majority": sum(n3_rank[s] >= n10_maj[s] for s in rows), "n_sets": len(rows),
+    diff3 = {s: n3_rank[s] - n3_maj[s] for s in rows}
+    diff10 = {s: n10_rank[s] - n10_maj[s] for s in rows}
+    a = {s: n3_rank[s] >= n10_maj[s] for s in rows}
+    b3 = {s: n3_rank[s] > n3_maj[s] for s in rows}
+    b10 = {s: n10_rank[s] > n10_maj[s] for s in rows}
+    counts = {"A_n3_rank_ge_n10_majority": sum(a.values()), "B_rank_gt_majority_n3": sum(b3.values()),
+              "B_rank_gt_majority_n10": sum(b10.values())}
+    return {"judged": judged, "n_sets": len(rows), "per_set": {"A": a, "B_n3": b3, "B_n10": b10}, "counts": counts,
+            "verdict": {k: verdict_label(c, len(rows)) if judged else None for k, c in counts.items()},
+            "n3_rank_ge_n10_majority": a, "count_n3_rank_ge_n10_majority": counts["A_n3_rank_ge_n10_majority"],
             "diff_n3_rank_minus_majority": diff3, "diff_n10_rank_minus_majority": diff10,
             "sign_test_n3": sign_test(list(diff3.values())), "sign_test_n10": sign_test(list(diff10.values()))}
 
@@ -181,7 +196,7 @@ def evaluate() -> dict:
                    "kg_rank_m": _summ([r["kg_rank"] for r in reps], ("m",))["m"],
                    "n_nodes": statistics.mean(r["n_nodes"] for r in reps)},
             "r1": r1_report(runs, m, rules)}
-    out["decision"] = decision(out["sets"])
+    out["decision"] = decision(out["sets"], out["judged"])
     base = RESULTS / exp.get("run_name", "phase1")
     base.with_suffix(".json").write_text(json.dumps(out, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     base.with_suffix(".md").write_text("\n".join(markdown(out)) + "\n", encoding="utf-8")
@@ -231,18 +246,67 @@ def markdown(out: dict) -> list[str]:
               f"{_f(r1['after']['precision'])}/{_f(r1['after']['recall'])}/{_f(r1['after']['f1'])}",
               "- R1이 잃은 정답 (실행 수): " + (", ".join(f"{g} {c}" for g, c in sorted(r1["lost_gold"].items(), key=lambda kv: (-kv[1], kv[0]))) or "없음"),
               ""]
-    d = out["decision"]
-    L += [f"## 판정 기준 ({'검증 세트 — 판정' if judged else '탐색 세트 — 참고, 판정 아님'})", "",
-          "| 세트 | n=3 kg-rank-v1 F1 | n=10 다수결 F1 | n=3 kg-rank ≥ n=10 다수결 | n=3: kg-rank − 다수결 | n=10: kg-rank − 다수결 |",
-          "|---|---|---|---|---|---|"]
+    L += f1_diff_table(out)
+    L += decision_lines(out["decision"], out["sets"], judged)
+    return L + [""]
+
+
+def f1_diff_table(out: dict) -> list[str]:
+    L = ["## 세트별 정답 클래스 수, 선택 수(m), 방법 간 F1 차이", "",
+         "| 세트 | 정답 클래스 | n=3 m (평균) | n=10 m | n=3 kg-rank − 다수결 | − 다수결+R1 | − 임계값 "
+         "| n=10 kg-rank − 다수결 | − 다수결+R1 | − 임계값 | n=3 kg-rank − n=10 다수결 |", "|---|" + "---|" * 10]
     for set_id, s in out["sets"].items():
+        if not s:
+            continue
+        f3 = {k: s["n3"][k]["f1"]["mean"] for k in METHODS}
+        f10 = {k: s["n10"][k]["f1"] for k in METHODS}
+        L.append(f"| {set_id} | {s['n_gold']} | {_f(s['n3']['kg_rank_m']['mean'], 1)} | {s['n10']['kg_rank']['m']} "
+                 f"| {f3['kg_rank'] - f3['majority']:+.3f} | {f3['kg_rank'] - f3['majority_r1']:+.3f} | {f3['kg_rank'] - f3['threshold']:+.3f} "
+                 f"| {f10['kg_rank'] - f10['majority']:+.3f} | {f10['kg_rank'] - f10['majority_r1']:+.3f} | {f10['kg_rank'] - f10['threshold']:+.3f} "
+                 f"| {f3['kg_rank'] - f10['majority']:+.3f} |")
+    return L + [""]
+
+
+def decision_lines(d: dict, sets: dict, judged: bool) -> list[str]:
+    L = [f"## 판정 기준 ({'검증 세트 — 판정' if judged else '판정 아님 (참고·탐색적)'})", "",
+          "| 세트 | n=3 kg-rank-v1 F1 | n=10 다수결 F1 | A (n=3 kg-rank ≥ n=10 다수결) | n=3: kg-rank − 다수결 | B n=3 (> 0) "
+          "| n=10: kg-rank − 다수결 | B n=10 (> 0) |",
+          "|---|---|---|---|---|---|---|---|"]
+    yes = lambda b: "예" if b else "아니오"  # noqa: E731
+    for set_id, s in sets.items():
         if s:
             L.append(f"| {set_id} | {_f(s['n3']['kg_rank']['f1']['mean'])} | {_f(s['n10']['majority']['f1'])} "
-                     f"| {'예' if d['n3_rank_ge_n10_majority'][set_id] else '아니오'} | {d['diff_n3_rank_minus_majority'][set_id]:+.3f} "
-                     f"| {d['diff_n10_rank_minus_majority'][set_id]:+.3f} |")
-    L += ["", f"- (1) n=3 kg-rank-v1 ≥ n=10 다수결: {d['count_n3_rank_ge_n10_majority']} / {d['n_sets']} 세트"]
+                     f"| {yes(d['per_set']['A'][set_id])} | {d['diff_n3_rank_minus_majority'][set_id]:+.3f} | {yes(d['per_set']['B_n3'][set_id])} "
+                     f"| {d['diff_n10_rank_minus_majority'][set_id]:+.3f} | {yes(d['per_set']['B_n10'][set_id])} |")
+    c, v = d["counts"], d["verdict"]
+    for key, label in (("A_n3_rank_ge_n10_majority", "A. n=3 kg-rank-v1 ≥ n=10 다수결"),
+                       ("B_rank_gt_majority_n3", "B. n=3 kg-rank-v1 > n=3 다수결"),
+                       ("B_rank_gt_majority_n10", "B. n=10 kg-rank-v1 > n=10 다수결")):
+        L.append(f"- {label}: {c[key]} / {d['n_sets']} 세트" + (f" → **{v[key]}**" if v[key] else ""))
+    L += ["", "- 부호검정 (참고로만, kg-rank − 같은 n 다수결):"]
     for key, label in (("sign_test_n3", "n=3"), ("sign_test_n10", "n=10")):
         t = d[key]
-        L.append(f"- (2) 부호검정 {label} (kg-rank − 다수결): 양수 {t['positive']}, 음수 {t.get('negative', 0)}, 0 {t.get('ties', 0)} → "
+        L.append(f"  - {label}: 양수 {t['positive']}, 음수 {t.get('negative', 0)}, 0 {t.get('ties', 0)} → "
                  f"한쪽 p {_f(t['p_one_sided'], 4)}, 양쪽 p {_f(t['p_two_sided'], 4)}")
-    return L + [""]
+    return L
+
+
+def combine() -> dict:
+    """탐색 4세트(results/generalization.json)와 검증 4세트(results/validation.json)를 합친 8세트 — 탐색적 분석만, 판정에 쓰지 않는다."""
+    parts = {name: json.loads((RESULTS / f"{name}.json").read_text(encoding="utf-8")) for name in ("generalization", "validation")}
+    for name, r in parts.items():
+        if r.get("kg_rank_file_sha256") != parts["validation"].get("kg_rank_file_sha256"):
+            raise ValueError(f"{name}: kg_rank_v1.yaml 해시가 다르다 (같은 규칙으로 채점하지 않았다)")
+    sets = {**parts["generalization"]["sets"], **parts["validation"]["sets"]}
+    out = {"sets": sets, "decision": decision(sets, judged=False), "from": {k: v["run_name"] for k, v in parts.items()},
+           "kg_rank_file_sha256": parts["validation"]["kg_rank_file_sha256"]}
+    L = ["# 탐색 4세트 + 검증 4세트 = 8세트 (탐색적 분석만, 판정에 쓰지 않음)", "",
+         "- kg-rank-v1은 탐색 세트를 본 뒤 정한 규칙이라, 탐색 세트가 들어간 이 합산은 판정 근거가 아니다",
+         f"- 같은 사전 고정 규칙(config/kg_rank_v1.yaml sha256 {out['kg_rank_file_sha256'][:12]}…)으로 채점한 두 결과를 합쳤다", ""]
+    L += f1_diff_table(out)
+    L += decision_lines(out["decision"], sets, False)
+    base = RESULTS / "kg_rank_v1_8sets"
+    base.with_suffix(".json").write_text(json.dumps(out, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    base.with_suffix(".md").write_text("\n".join(L) + "\n", encoding="utf-8")
+    print(f"→ {base.with_suffix('.md').relative_to(ROOT)}, {base.with_suffix('.json').relative_to(ROOT)}")
+    return out
