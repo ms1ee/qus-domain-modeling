@@ -40,7 +40,7 @@ class KeyStories:
         return {e["story"] for e in self.edges(key)}
 
 
-def _relation_keys(associations) -> list[tuple[str, str]]:
+def relation_keys(associations) -> list[tuple[str, str]]:
     out = []
     for x, y in associations or []:
         a, b = class_key(str(x)), class_key(str(y))
@@ -69,7 +69,7 @@ def node_features(runs: list[dict], ks: KeyStories) -> list[dict]:
             c = out.setdefault(n["key"], {"key": n["key"], "names": Counter(), "runs": 0})
             c["names"][n["name"]] += 1
             c["runs"] += 1
-        for a, b in _relation_keys(r["associations"]):
+        for a, b in relation_keys(r["associations"]):
             partners[a].add(b)
             partners[b].add(a)
     rows = []
