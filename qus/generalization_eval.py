@@ -279,6 +279,7 @@ def decision_lines(d: dict, sets: dict, judged: bool) -> list[str]:
                      f"| {yes(d['per_set']['A'][set_id])} | {d['diff_n3_rank_minus_majority'][set_id]:+.3f} | {yes(d['per_set']['B_n3'][set_id])} "
                      f"| {d['diff_n10_rank_minus_majority'][set_id]:+.3f} | {yes(d['per_set']['B_n10'][set_id])} |")
     c, v = d["counts"], d["verdict"]
+    L.append("")
     for key, label in (("A_n3_rank_ge_n10_majority", "A. n=3 kg-rank-v1 ≥ n=10 다수결"),
                        ("B_rank_gt_majority_n3", "B. n=3 kg-rank-v1 > n=3 다수결"),
                        ("B_rank_gt_majority_n10", "B. n=10 kg-rank-v1 > n=10 다수결")):
