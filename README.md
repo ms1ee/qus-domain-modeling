@@ -125,8 +125,9 @@ output/<model>/<outdir>/
 
 | 항목 | 상태 |
 |---|---|
-| 과제 37 (Company Team Building Event Smart Lottery System) | 준비 완료 |
-| 과제 44, 29 | 진행 중 |
+| 과제 37 (Company Team Building Event Smart Lottery System) | 단위 테스트 준비 완료 (15항목) |
+| 과제 44 (Beijing Subway Fare Calculation System) | 단위 테스트 준비 완료 (11항목) |
+| 과제 29 (Food Delivery Order Dispatch System) | 단위 테스트 준비 완료 (9항목) |
 | 단위 테스트 채점 | 구현 |
 | shell_interaction 테스트 채점 | 예정 |
 | 결함 주입 PRD | 예정 |
