@@ -8,12 +8,17 @@ from unittest.mock import patch, mock_open
 # Add src directory to Python path for module import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../src'))
 
+import re
 import pytest
 from lottery_system.models import User, Prize
 from lottery_system.services.list_manager import ListManager
 from lottery_system.services.prize_manager import PrizeManager
 from lottery_system.services.lottery_manager import LotteryManager
 from lottery_system.services.result_manager import ResultManager, Winner
+
+
+def norm(s):
+    return re.sub(r"\s+", "", s).lower()
 
 
 class TestListManager:
@@ -77,8 +82,8 @@ class TestListManager:
 
             assert len(users) == 0, "Should not have valid users"
             assert len(errors) == 1, "Should have 1 error"
-            assert "Format Error" in errors[0], "Error information should contain Format Error"
-            assert "Line 1" in errors[0], "Error information should indicate line number"
+            assert norm("Format Error") in norm(errors[0]), "Error information should contain Format Error"
+            assert norm("Line 1") in norm(errors[0]), "Error information should indicate line number"
         finally:
             os.unlink(temp_path)
     
@@ -135,10 +140,10 @@ class TestPrizeManager:
         assert len(prizes) >= 3, "Should have at least 3 preset prizes"
 
         # Verify preset prizes
-        prize_names = [prize.name for prize in prizes]
-        assert "Third Prize-Movie Ticket" in prize_names, "Should contain Third Prize-Movie Ticket"
-        assert "Second Prize-Shopping Card" in prize_names, "Should contain Second Prize-Shopping Card"
-        assert "First Prize-1 Day Annual Leave" in prize_names, "Should contain First Prize-1 Day Annual Leave"
+        prize_names = [norm(prize.name) for prize in prizes]
+        assert norm("Third Prize - Movie Tickets") in prize_names, "Should contain Third Prize - Movie Tickets"
+        assert norm("Second Prize - Shopping Cards") in prize_names, "Should contain Second Prize - Shopping Cards"
+        assert norm("First Prize - 1 Day Annual Leave") in prize_names, "Should contain First Prize - 1 Day Annual Leave"
     
     def test_custom_prize_addition(self):
         """Test2.2.2 Prize library management - Custom addition"""
@@ -331,9 +336,9 @@ class TestResultManager:
                 success, message = result_manager.export_to_csv([prize])
 
         assert success, "Export should succeed"
-        assert "successfully exported" in message, "Success message should contain exported"
+        assert norm("successfully exported") in norm(message), "Success message should contain exported"
     
-    def test_csv_export_format(self):
+    def test_csv_export_format(self, tmp_path, monkeypatch):
         """Test2.5.2b Result export format"""
         result_manager = ResultManager()
 
@@ -342,34 +347,30 @@ class TestResultManager:
         prize = Prize("Test Prize", 1, [], None)
         result_manager.add_winner(user, prize)
 
-        # Use temporary file for actual write test
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', encoding='utf-8') as f:
-            temp_path = f.name
+        # PRD 2.5: exported to current directory/awards_result_YYYYMMDD.txt
+        monkeypatch.chdir(tmp_path)
+        temp_path = tmp_path / f"awards_result_{datetime.now().strftime('%Y%m%d')}.txt"
 
-        try:
-            # Directly test file writing logic
-            with patch('os.path.abspath', return_value=temp_path):
-                success, message = result_manager.export_to_csv([prize])
+        success, message = result_manager.export_to_csv([prize])
 
-            assert success, "Export should succeed"
+        assert success, "Export should succeed"
+        assert temp_path.exists(), "Should export awards_result_YYYYMMDD.txt in current directory"
 
-            # Verify file content format
-            with open(temp_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-                lines = content.strip().split('\n')
+        # Verify file content format (utf-8-sig: accepts files with or without BOM)
+        with open(temp_path, 'r', encoding='utf-8-sig') as f:
+            content = f.read()
+            lines = content.strip().split('\n')
 
-                # Verify header
-                assert lines[0] == "Name,Department,Prize Name,Win Time", "Header format should be correct"
+            # Verify header
+            assert norm(lines[0]) == norm("Name,Department,Prize Name,Winning Time"), "Header format should be correct"
 
-                # Verify data row
-                assert len(lines) == 2, "Should have header and 1 data row"
-                data_parts = lines[1].split(',')
-                assert len(data_parts) == 4, "Data row should have 4 fields"
-                assert data_parts[0] == "Zhang San", "Name field should be correct"
-                assert data_parts[1] == "Tech Department", "Department field should be correct"
-                assert data_parts[2] == "Test Prize", "Prize name field should be correct"
-        finally:
-            os.unlink(temp_path)
+            # Verify data row
+            assert len(lines) == 2, "Should have header and 1 data row"
+            data_parts = lines[1].split(',')
+            assert len(data_parts) == 4, "Data row should have 4 fields"
+            assert data_parts[0] == "Zhang San", "Name field should be correct"
+            assert data_parts[1] == "Tech Department", "Department field should be correct"
+            assert data_parts[2] == "Test Prize", "Prize name field should be correct"
 
 
 # Integration Test

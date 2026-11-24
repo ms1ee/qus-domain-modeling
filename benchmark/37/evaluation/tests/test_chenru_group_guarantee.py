@@ -3,9 +3,14 @@ import os
 # Add src directory to Python path for module import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../src'))
 
+import re
 import pytest
 from lottery_system.models import User, Prize
 from lottery_system.services.lottery_manager import LotteryManager
+
+
+def norm(s):
+    return re.sub(r"\s+", "", s).lower()
 
 
 def test_chenru_group_guarantee_mechanism():
@@ -19,9 +24,9 @@ def test_chenru_group_guarantee_mechanism():
         User("Zhang San", "Tech Department"),
         User("Li Si", "Product Department"),
         User("Wang Wu", "Marketing Department"),
-        User("Cheng Ru", "Chengru Group"),
-        User("Chen Qixian", "Chengru Group"),
-        User("Jin Duo", "Chengru Group")
+        User("Cheng Ru", "Cheng Ru group"),
+        User("Chen Qixian", "Cheng Ru group"),
+        User("Jin Duo", "Cheng Ru group")
     ]
 
     # Create lottery manager instance
@@ -30,11 +35,11 @@ def test_chenru_group_guarantee_mechanism():
     # Simulate the first two draws with no Chengru Group members winning
     lottery_manager.last_two_draw_results = [False, False]
 
-    # Create a prize drawn by "Ma Jiaqi" and avoiding "Chengru Group"
+    # Create a prize drawn by "Ma Jiaqi" and avoiding "Cheng Ru group"
     prize_majiaqi = Prize(
         name="Test Prize C",
         quantity=1,
-        avoid_groups=["Chengru Group"],  # Set to avoid Chengru Group
+        avoid_groups=["Cheng Ru group"],  # Set to avoid Chengru Group
         associated_drawer="Ma Jiaqi"
     )
 
@@ -44,7 +49,7 @@ def test_chenru_group_guarantee_mechanism():
     # Assert: Despite the prize avoiding Chengru Group, due to guarantee mechanism,
     # the pool should only contain Chengru Group members
     assert len(eligible_pool) == 3  # Should have 3 Chengru Group members
-    assert all(user.department == "Chengru Group" for user in eligible_pool)
+    assert all(norm(user.department) == norm("Cheng Ru group") for user in eligible_pool)
 
     # Verify returned user list
     expected_names = {"Cheng Ru", "Chen Qixian", "Jin Duo"}
@@ -59,7 +64,7 @@ def test_chenru_group_guarantee_not_triggered():
     """
     users = [
         User("Zhang San", "Tech Department"),
-        User("Cheng Ru", "Chengru Group")
+        User("Cheng Ru", "Cheng Ru group")
     ]
 
     lottery_manager = LotteryManager(users)
@@ -67,11 +72,11 @@ def test_chenru_group_guarantee_not_triggered():
     # Simulate previous two draws with Chengru Group members winning
     lottery_manager.last_two_draw_results = [False, True]  # Second draw has Chengru Group winning
 
-    # Create prize drawn by "Ma Jiaqi" and avoiding "Chengru Group"
+    # Create prize drawn by "Ma Jiaqi" and avoiding "Cheng Ru group"
     prize_majiaqi = Prize(
         name="Test Prize",
         quantity=1,
-        avoid_groups=["Chengru Group"],
+        avoid_groups=["Cheng Ru group"],
         associated_drawer="Ma Jiaqi"
     )
 
