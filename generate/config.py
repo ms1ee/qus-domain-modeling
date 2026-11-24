@@ -61,9 +61,9 @@ data_loader
   load_subway_data(path) -> dict                  # the JSON content of the file
 models
   Edge(source, dest, distance, line)              # source/dest: station numbers; attrs: weight (= distance), line
-  Graph()
+  Graph()                                         # station numbers are assigned by the caller, not by Graph
     set_station_lines(station_name, lines)
-    add_edge(edge)
+    add_edge(edge)                                # accepts any station numbers used by the edges
     station_lines: dict[station name, list[str]]
 pathfinding
   PathfindingConfig()                             # attrs: mode, max_transfers, preferred_lines (list[str])
@@ -86,11 +86,12 @@ system
   init_system()                                   # system startup: reset global state
 rider
   Rider(rider_id)                                 # attrs: rider_id, x, y, speed, state, orders (list[Order]), log (list[dict])
-    move()                                        # advance one tick; state transitions are applied here
+    An order is assigned to a rider by appending it to rider.orders.
+    move()                                        # advance one tick; state transitions and their log entries happen here
     log entries: dict with keys "event" and "order_id"
       events: "spawn", "accepted_order", "arrived_at_merchant", "delivered_to_customer"
 order_model
-  Order(res_pos, cus_pos)                         # (x, y) tuples; attrs: id, status ("completed" after delivery)
+  Order(res_pos, cus_pos)                         # (x, y) tuples stored as given; attrs: id, status ("completed" after delivery)
     assign_to(rider_id)
 order
   find_best_rider_for_order(order) -> Rider       # among the riders in globalvar "riders"
