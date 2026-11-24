@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os, re, sys, csv, json, time, shlex, shutil, argparse, tempfile, subprocess
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -11,7 +12,7 @@ EXCLUDED = {
     "37": {"2.3.2": "interactive control (stdin), shell stage",
            "2.3.3": "interactive control (stdin), shell stage"},
 }
-TIMEOUT = 60  # seconds per item
+TIMEOUT = 60  # seconds per testcase (pytest call)
 
 RUN_DIR = re.compile(r"^(\d+)-(.+)-(direct|modeling)-iter-(\d+)$")
 RESULT_NAME = "result.json"
@@ -29,15 +30,47 @@ def unit_test_items(task):
     return items
 
 
+def other_types(task):
+    with open(os.path.join(BENCHMARK_DIR, task, "evaluation", "detailed_test_plan.json")) as f:
+        plan = json.load(f)
+    counts = defaultdict(int)
+    for t in plan:
+        if t["type"] != "unit_test":
+            counts[t["type"]] += 1
+    return dict(counts)
+
+
 def short_message(output):
-    lines = [l for l in output.splitlines() if l.startswith("E ")]
+    lines = [l for l in output.splitlines() if l.startswith(("E ", "SKIPPED"))]
     return "\n".join((lines or output.splitlines()[-15:])[:10])
+
+
+def junit_status(path):
+    # skipped tests exit with 0, so read the per-test outcome from the JUnit report
+    try:
+        cases = ET.parse(path).getroot().iter("testcase")
+    except (OSError, ET.ParseError):
+        return "error"
+    status = None
+    for tc in cases:
+        if tc.find("error") is not None:
+            return "error"
+        if tc.find("failure") is not None:
+            status = "fail"
+        elif tc.find("skipped") is not None and status is None:
+            status = "skip"
+        elif status is None:
+            status = "pass"
+    return status or "error"  # no test collected
 
 
 def run_item(workspace, test_command):
     args = shlex.split(test_command)
     assert args[0] == "pytest", test_command
-    cmd = [sys.executable, "-m", "pytest"] + args[1:] + ["-q", "-p", "no:cacheprovider"]
+    junit = os.path.join(workspace, "junit.xml")
+    if os.path.exists(junit):
+        os.remove(junit)
+    cmd = [sys.executable, "-m", "pytest"] + args[1:] + ["-q", "-rs", "-p", "no:cacheprovider", "--junitxml", junit]
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
     start = time.time()
     try:
@@ -46,8 +79,8 @@ def run_item(workspace, test_command):
     except subprocess.TimeoutExpired:
         return "timeout", TIMEOUT, "timeout after %ds" % TIMEOUT
     duration = round(time.time() - start, 2)
-    # 0: passed, 1: assertion failed, others (2 interrupted/collection error, 5 no tests): error
-    status = {0: "pass", 1: "fail"}.get(p.returncode, "error")
+    # pass / fail (assertion) / error (import, collection, no test) / skip; only pass scores
+    status = junit_status(junit)
     message = "" if status == "pass" else short_message(p.stdout + p.stderr)
     return status, duration, message
 
@@ -55,7 +88,7 @@ def run_item(workspace, test_command):
 def evaluate_run(run_dir, task, prd, pipeline, nth):
     items = unit_test_items(task)
     result = {"task": task, "prd": prd, "pipeline": pipeline, "iter": nth,
-              "items": {}, "excluded": EXCLUDED.get(task, {})}
+              "items": {}, "excluded": EXCLUDED.get(task, {}), "not_evaluated": other_types(task)}
     src = os.path.join(run_dir, "src")
     with tempfile.TemporaryDirectory(prefix="prdbench-eval-") as workspace:
         if os.path.isdir(src):
