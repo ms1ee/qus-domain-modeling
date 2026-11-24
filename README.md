@@ -139,4 +139,4 @@ output/<model>/<outdir>/
 | Claude-Opus-5.5 | `claude-opus-5-5` |
 | Claude-Haiku-5.5 | `claude-haiku-5-5` |
 
-effort `medium`, max tokens 64000.
+effort `medium`, max tokens 128000.

@@ -12,7 +12,7 @@ MODELS = {
 
 ## Claude Opus/Haiku 5.5: no temperature (400), adaptive thinking, effort default medium
 EFFORT = "medium"
-MAX_TOKENS = 64000
+MAX_TOKENS = 128000
 
 ## Benchmarks: PRDBench task id -> info. PRD file: benchmark/<id>/<prd>_PRD.md
 ## interface: code touchpoints of the scored unit tests that the PRD does not define (code generation only)
