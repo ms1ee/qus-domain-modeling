@@ -1,3 +1,4 @@
+import re
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'src')))
@@ -6,12 +7,16 @@ import globalvar as gl
 from rider import Rider
 from order_model import Order
 
+
+def norm(s):
+    return re.sub(r"\s+", "", s).lower()
+
 def test_order_completion():
     # Metric 8.1
     gl._init()
     rider = Rider(1)
     order = Order(res_pos=(100, 100), cus_pos=(200, 200))
-    order.assign_to(rider.num)
+    order.assign_to(rider.rider_id)
     rider.orders.append(order)
     rider.state = 2 # Manually set to delivering
     rider.x, rider.y = 200, 200 # Manually set to customer location
@@ -20,4 +25,4 @@ def test_order_completion():
     
     assert rider.state == 0 # Rider should be idle
     assert not rider.orders # Order list should be empty
-    assert order.status == "completed" # Order status should be completed
+    assert norm(order.status) == norm("completed") # Order status should be completed

@@ -1,3 +1,4 @@
+import re
 import os
 import sys
 import time
@@ -11,6 +12,10 @@ from models import Graph, Edge
 from pathfinding import ShortestPath
 from fare_calculator import calculate_estimated_time
 from data_loader import load_subway_data, DATA_FILE_PATH
+
+
+def norm(s):
+    return re.sub(r"\s+", "", s).lower()
 
 
 class TestPathfinding:
@@ -367,7 +372,7 @@ class TestPathfinding:
         from pathfinding import PathfindingConfig
         config_pref_line = PathfindingConfig()
         config_pref_line.mode = "shortest_distance"
-        config_pref_line.preferred_lines = [" 1"] #  1 is part of the path
+        config_pref_line.preferred_lines = ["Line 1"] # Line 1 is part of the path
         path_finder_pref = ShortestPath(metro_graph, start_id, config_pref_line)
 
         assert path_finder_pref.dist_to.get(end_id, float("inf")) != float("inf"), "After setting preferred line, should be able to find path"
@@ -379,10 +384,10 @@ class TestPathfinding:
         # A more robust test would require a more robust _is_line_acceptable.
 
         # Check if any edge in the path uses the preferred line (if applicable)
-        uses_preferred_line = any(" 1" in edge.line for edge in edges) # Assuming line is a string like " 1"
-        print(f"Line preference ' 1': {start_station} -> {end_station}, path contains Line 1: {uses_preferred_line}")
+        uses_preferred_line = any(norm(edge.line) == norm("Line 1") for edge in edges)
+        print(f"Line preference 'Line 1': {start_station} -> {end_station}, path contains Line 1: {uses_preferred_line}")
         # For this specific route, it should contain  1.
-        assert uses_preferred_line, "Path should contain preferred line ' 1'"
+        assert uses_preferred_line, "Path should contain preferred line 'Line 1'"
 
 if __name__ == "__main__":
     pytest.main([__file__])

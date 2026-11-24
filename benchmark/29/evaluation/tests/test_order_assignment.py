@@ -23,4 +23,4 @@ def test_find_best_rider_for_order():
     
     best_rider = find_best_rider_for_order(order)
     
-    assert best_rider.num == 1, "Failed to assign order to the nearest rider"
+    assert best_rider.rider_id == 1, "Failed to assign order to the nearest rider"

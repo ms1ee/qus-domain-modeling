@@ -12,8 +12,8 @@ def test_rider_initial_position():
     """
     Tests the initial position of a newly created rider.
     """
-    system.init_system() # Reset global state and create initial rider
-    rider = gl.get_value('riders')[0] # Get the first rider created by init_system
+    system.init_system() # Reset global state (PRD 2.1: rider list starts empty)
+    rider = Rider(1) # Newly created rider (PRD 2.1: initial rider attributes)
     # By default, a rider should be at (435, 385) as per current Rider class
     assert rider.x == 435 and rider.y == 385
 
@@ -22,8 +22,8 @@ def test_rider_initial_speed():
     """
     Tests the initial speed of a newly created rider.
     """
-    system.init_system() # Reset global state and create initial rider
-    rider = gl.get_value('riders')[0] # Get the first rider created by init_system
+    system.init_system() # Reset global state (PRD 2.1: rider list starts empty)
+    rider = Rider(1) # Newly created rider (PRD 2.1: initial rider attributes)
     # By default, a rider should have a speed of 10 as per current Rider class
     assert rider.speed == 10
 
@@ -32,7 +32,7 @@ def test_rider_initial_state():
     """
     Tests the initial state of a newly created rider.
     """
-    system.init_system() # Reset global state and create initial rider
-    rider = gl.get_value('riders')[0] # Get the first rider created by init_system
+    system.init_system() # Reset global state (PRD 2.1: rider list starts empty)
+    rider = Rider(1) # Newly created rider (PRD 2.1: initial rider attributes)
     # By default, a rider should be idle (state 0) as per current Rider class
     assert rider.state == 0

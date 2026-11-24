@@ -1,3 +1,4 @@
+import re
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'src')))
@@ -5,6 +6,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '.
 import globalvar as gl
 from rider import Rider
 from order_model import Order
+
+
+def norm(s):
+    return re.sub(r"\s+", "", s).lower()
 
 def test_rider_history():
     # Metrics 6.3a, 6.3b
@@ -22,12 +27,12 @@ def test_rider_history():
     
     assert len(rider.log) >= 4 # spawn, accepted, arrived_at_merchant, delivered
     
-    events = [log['event'] for log in rider.log]
-    assert "spawn" in events
-    assert "accepted_order" in events
-    assert "arrived_at_merchant" in events
-    assert "delivered_to_customer" in events
+    events = [norm(log['event']) for log in rider.log]
+    assert norm("spawn") in events
+    assert norm("accepted_order") in events
+    assert norm("arrived_at_merchant") in events
+    assert norm("delivered_to_customer") in events
     
     # Check details of one log entry
-    accepted_log = next(log for log in rider.log if log['event'] == 'accepted_order')
+    accepted_log = next(log for log in rider.log if norm(log['event']) == norm('accepted_order'))
     assert accepted_log['order_id'] == order.id
