@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, re, sys, json, time, argparse, subprocess
+import os, re, sys, json, time, shutil, argparse, subprocess
 from dotenv import load_dotenv
 from config import *
 from prompt import *
@@ -65,6 +65,10 @@ def run_once(llm, task, prd, use_modeling, run_dir):
     files, rejected = extract_files(response)
     for path, content in files.items():
         write_file(os.path.join(run_dir, path), content)
+    # provided files (benchmark/<task>/src/, e.g. data) overwrite any generated copy
+    provided = os.path.join(BENCHMARK_DIR, task, "src")
+    if os.path.isdir(provided):
+        shutil.copytree(provided, os.path.join(run_dir, "src"), dirs_exist_ok=True)
     usage["files"] = sorted(files)
     usage["rejected_paths"] = rejected
     print("  [*] Wrote %d file(s) under src/%s"
@@ -105,11 +109,11 @@ def main():
     with open(prd_path, encoding="utf-8") as f:
         prd = f.read()
 
+    llm = make_llm(args.model)
     outdir = os.path.join(OUTDIR_BASE, args.model, args.outdir)
     os.makedirs(outdir, exist_ok=True)
     log_gen_info(outdir, args)
 
-    llm = make_llm(args.model)
     pipeline = "modeling" if args.modeling else "direct"
     for i in range(args.iters):
         run_dir = os.path.join(outdir, "%s-%s-%s-iter-%d" % (args.task, args.prd, pipeline, i))

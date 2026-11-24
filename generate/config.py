@@ -49,6 +49,51 @@ lottery_system.services.result_manager
     export_to_csv(prizes) -> (bool success, str message)    # success message contains "successfully exported"
 """,
     },
-}
+    "44": {
+        "name": "Beijing Subway Fare Calculation System",
+        "interface": """Provided data file: src/subway_data.json (already present, do not write it)
+  {"stations": [{"name": str, "lines": [str]}],
+   "connections": [{"source": str, "dest": str, "distance": int (meters), "line": str}]}
 
-PIPELINES = ["direct", "modeling"]
+Top-level modules under src/:
+data_loader
+  DATA_FILE_PATH                                  # path of src/subway_data.json, valid from any working directory
+  load_subway_data(path) -> dict                  # the JSON content of the file
+models
+  Edge(source, dest, distance, line)              # source/dest: station numbers; attrs: weight (= distance), line
+  Graph()
+    set_station_lines(station_name, lines)
+    add_edge(edge)
+    station_lines: dict[station name, list[str]]
+pathfinding
+  PathfindingConfig()                             # attrs: mode, max_transfers, preferred_lines (list[str])
+  ShortestPath(graph, source, config=None)        # source: station number
+    dist_to: dict[station number, distance]
+    path_with_edges(target) -> (list[station number], list[Edge])
+    get_transfer_count(target) -> int
+fare_calculator
+  Sum_money(distance) -> int                      # distance in meters, fare in yuan
+  calculate_estimated_time(distance, transfer_count) -> float   # distance in meters, time in minutes
+""",
+    },
+    "29": {
+        "name": "Food Delivery Order Dispatch System",
+        "interface": """Top-level modules under src/:
+globalvar
+  _init()                                         # reset the global store
+  set_value(key, value), get_value(key)           # key "riders": list[Rider]
+system
+  init_system()                                   # system startup: reset global state
+rider
+  Rider(rider_id)                                 # attrs: rider_id, x, y, speed, state, orders (list[Order]), log (list[dict])
+    move()                                        # advance one tick; state transitions are applied here
+    log entries: dict with keys "event" and "order_id"
+      events: "spawn", "accepted_order", "arrived_at_merchant", "delivered_to_customer"
+order_model
+  Order(res_pos, cus_pos)                         # (x, y) tuples; attrs: id, status ("completed" after delivery)
+    assign_to(rider_id)
+order
+  find_best_rider_for_order(order) -> Rider       # among the riders in globalvar "riders"
+""",
+    },
+}
