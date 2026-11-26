@@ -8,6 +8,8 @@ OUTDIR_BASE = os.path.join(ROOT_DIR, "output")
 MODELS = {
     "Claude-Opus-5.5": ("anthropic", "claude-opus-5-5"),
     "Claude-Haiku-5.5": ("anthropic", "claude-haiku-5-5"),
+    "Qwen3-Coder-30B": ("lmstudio", "qwen/qwen3-coder-30b"),
+    "gpt-oss-20b": ("lmstudio", "openai/gpt-oss-20b"),
 }
 
 ## Claude Opus/Haiku 5.5: no temperature (400), adaptive thinking, effort default medium

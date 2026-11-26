@@ -1,0 +1,357 @@
+# LM Studio 실험 안내
+
+이 문서는 `feat/lmstudio-prdbench` 브랜치에서 **Qwen3-Coder-30B-A3B-Instruct와
+gpt-oss-20b로 PRDBench의 37·44·29번을 실행하는 방법**을 설명한다.
+처음에는 아래 빠른 시작을 따라 하고, 설정과 결과 해석이 필요할 때 뒤의 항목을 보면 된다.
+
+## 1. 무엇을 비교하는 실험인가
+
+| 프로젝트 | 내용 | 현재 채점 범위 |
+|---|---|---|
+| 37 | 회사 행사 추첨 시스템 | 15개 지표 / 15개 테스트 명령 |
+| 44 | 베이징 지하철 요금 계산 시스템 | 11개 지표 / 15개 테스트 명령 |
+| 29 | 음식 배달 주문 배정 시스템 | 9개 지표 / 9개 테스트 명령 |
+
+PRD를 읽어 Python 코드를 만들고, 저장소의 단위 테스트로 검증한 뒤 실패 내용을
+모델에 전달해 수정한다. 모델이 직접 셸 도구를 선택해 작업하는 에이전트 방식과는 다르다.
+파일 반영과 테스트 실행은 이 저장소의 실행기가 담당한다.
+
+- 기본 입력은 `benchmark/<번호>/vanilla_PRD.md`이며 결함을 주입하지 않는다.
+- 기본 실행은 두 모델 × 세 프로젝트 × `direct` × 1회 = **6개 독립 실험**이다.
+- 각 실험은 **최초 생성 1회 + 최대 수정 30회**이며, 채점 대상이 모두 통과하면 바로 끝난다.
+- 이 점수는 저장소의 단위 테스트 채점 결과다. PRDBench 전체 공식 점수,
+  CLI 인수 테스트, human inspection까지 완료했다는 뜻은 아니다.
+- 테스트의 원본 대비 변경·제외 항목과 해석상 한계는 [PROVENANCE](benchmark/PROVENANCE.md)를 참고한다.
+  37번의 대화형 제어 항목 2.3.2·2.3.3은 현재 단위 테스트 채점에서 제외된다.
+
+## 2. 현재 연구 서버에서 빠르게 시작하기
+
+`/home/kg` 서버에는 Python 환경, Node.js, LM Studio SDK와 두 모델이 준비되어 있다.
+**같은 서버에서 다른 실험이 모델을 사용 중이면 그 실험이 끝난 뒤 시작한다.**
+아래 상태 확인 명령은 모델을 로드하거나 해제하지 않는다.
+
+```bash
+cd /home/kg/qus-domain-modeling
+export PATH="$HOME/.lmstudio/bin:$PATH"
+lms server status
+lms ps --json
+
+# 실행 계획만 확인: 모델 요청·로드·파일 생성 없음
+./run_lmstudio.sh --dry-run
+
+# 서버가 실행 중이고 로드된 모델 목록이 비어 있을 때 시작
+./run_lmstudio.sh
+```
+
+기본 순서는 **Qwen 37 → 44 → 29 → gpt-oss 37 → 44 → 29**다.
+프로젝트마다 `새 모델 로드 → 생성·검증·수정 → 모델 해제`를 반복한다.
+진행 중인 모델을 수동으로 해제하거나 같은 배치를 한 번 더 시작하지 않는다.
+
+터미널 연결이 끊겨도 계속 실행하려면 tmux 안에서 시작한다.
+
+```bash
+tmux new-session -s lmstudio
+cd /home/kg/qus-domain-modeling
+./run_lmstudio.sh
+```
+
+`Ctrl+B`를 누른 뒤 `D`로 화면에서 나올 수 있다. 이미 실행 중인 세션은
+`tmux attach -t lmstudio`로 다시 확인한다. 새로 실행할 필요가 없다.
+
+## 3. 다른 서버에서 처음 준비하기
+
+현재 실행기는 **Linux/Bash, NVIDIA GPU와 `nvidia-smi`, Python, Node.js, LM Studio**를
+전제로 한다. 파일 잠금에 `fcntl`을 사용하고, GPU 메모리는 실행기 호스트의 GPU 0에서
+측정하므로 LM Studio도 같은 서버에서 실행하는 구성이 기준이다.
+macOS/Windows나 원격 GPU 서버에서 그대로 동작하는 구성으로 검증하지 않았다.
+
+확인한 개발 환경은 Python **3.12.3**, Node.js **18.19.1**, LM Studio JS SDK **2.1.0**이다.
+생성 모델에는 Python 3.10 문법과 표준 라이브러리만 사용하도록 지시한다.
+현재 연구 서버는 RTX 2070 SUPER 8 GiB와 약 62 GiB RAM을 사용하며, 모델 가중치 일부는
+CPU/RAM에 둔다. 이 사양은 확인 환경이며 모든 프로젝트의 성공이나 실행 시간을 보장하지 않는다.
+
+### Python 환경
+
+저장소를 받은 후 루트에서 실행한다.
+
+```bash
+python3.12 -m venv .venv
+export PRDBENCH_PYTHON="$PWD/.venv/bin/python"
+"$PRDBENCH_PYTHON" -m pip install -r requirements-lmstudio.txt
+```
+
+`run_lmstudio.sh`의 기본 Python 경로는 `/home/kg/.venvs/prdbench/bin/python`이다.
+다른 환경에서는 **`PRDBENCH_PYTHON`을 셸에서 export**해야 한다. 이 변수는 래퍼가
+Python을 실행하기 전에 읽으므로 `.env`에만 넣어서는 적용되지 않는다.
+LM Studio 실행에는 Anthropic 패키지나 Claude API 키가 필요 없다.
+
+### 모델과 서버
+
+LM Studio와 `lms` CLI를 설치한 환경에서 다음 모델을 다운로드한다.
+이미 같은 양자화 파일이 있으면 다시 받을 필요가 없다.
+
+```bash
+export PATH="$HOME/.lmstudio/bin:$PATH"
+lms get qwen/qwen3-coder-30b@q4_k_m --gguf
+lms get openai/gpt-oss-20b --gguf
+```
+
+Qwen은 **Q4_K_M**, gpt-oss는 **MXFP4**를 선택한다. 다른 양자화는 현재 설정 검증에서
+거절된다. 단순히 GGUF 파일명이 비슷한 것만으로는 충분하지 않으며 아래 모델 키로
+LM Studio에서 로드할 수 있어야 한다.
+
+```bash
+# 서버가 꺼져 있을 때 실행
+lms server start --port 1234
+lms server status
+lms ps --json
+```
+
+배치 실행 전에는 모델을 수동으로 미리 로드하지 않는다. 배치가 자신의 식별자로
+로드한다. 기존 모델이 있으면 재사용하거나 강제 해제하지 않고 중단한다.
+
+### JavaScript SDK
+
+기본 탐색 경로는 다음과 같다.
+
+```text
+~/.lmstudio/extensions/plugins/lmstudio/rag-v1/node_modules/@lmstudio/sdk/dist/index.mjs
+```
+
+이 파일이 없는 환경에서는 SDK를 별도로 설치하고 실제 경로를 지정할 수 있다.
+
+```bash
+npm install --prefix .lmstudio-sdk @lmstudio/sdk@2.1.0
+export LMSTUDIO_SDK_PATH="$PWD/.lmstudio-sdk/node_modules/@lmstudio/sdk/dist/index.mjs"
+```
+
+설치 폴더는 Git에서 제외된다. `node`가 PATH에 있어야 하며, HTTP API뿐 아니라
+같은 호스트·포트의 SDK WebSocket 연결도 필요하다.
+
+## 4. 모델 설정
+
+실험 설정의 기준 파일은 [generate/lmstudio_profiles.json](generate/lmstudio_profiles.json)이다.
+다음 값은 이 실험에서 고정한 기본값이다. 모두 모델 제작사의 권장값이라는 의미는 아니다.
+샘플링 값은 요청마다 API로 전달하므로 LM Studio 화면의 기본값과 달라도 요청값이 적용된다.
+
+| 항목 | Qwen3-Coder-30B-A3B-Instruct | gpt-oss-20b |
+|---|---|---|
+| 이 저장소의 모델 선택 이름 | `Qwen3-Coder-30B` | `gpt-oss-20b` |
+| LM Studio 모델 키 | `qwen/qwen3-coder-30b` | `openai/gpt-oss-20b` |
+| 양자화 | Q4_K_M | MXFP4 |
+| temperature | 0.7 | 1.0 |
+| top_p / top_k | 0.8 / 20 | 1.0 / 0 |
+| repeat_penalty / min_p | 1.05 / 0 | 1.0 / 0 |
+| seed | 42 | 42 |
+| reasoning_effort | 지정하지 않음 | high |
+
+공통 자원·요청 설정은 다음과 같다.
+
+| 항목 | 설정과 의미 |
+|---|---|
+| CPU/GPU | MoE expert는 CPU, 나머지 레이어는 가능한 한 GPU에 배치 |
+| CPU 스레드 | 현재 서버의 모델별 기본값 10. 아래 설명 참고 |
+| 컨텍스트 | 65,536부터 로드. 메모리 부족 또는 로드 후 GPU 여유 768 MiB 미만일 때만 32,768로 재시도 |
+| KV cache | GPU에 배치, F16, KV 양자화 비활성화 |
+| Flash Attention / 동시 예측 | 활성화 / 1개 |
+| 출력 상한 | API의 `max_tokens=-1`. 실제 출력은 컨텍스트와 모델의 종료 조건에 제한됨 |
+| 입력 예산 | 실제 컨텍스트 − 출력 여유 8,192 − 템플릿 여유 1,024토큰 |
+| API 재시도 | 최초 요청 후 최대 5회, 1/2/4/8/16초 대기. 일시적 연결·HTTP 오류에만 적용 |
+| 시간 제한 | API 연결 10초, 응답 대기 상한 없음. 테스트 명령마다 60초 |
+
+출력 여유 8,192는 입력을 너무 많이 넣지 않기 위한 예약량이며 **출력 길이의 상한은 아니다**.
+32,768 컨텍스트라면 입력 예산은 23,552토큰이다. 실제 로드값은 결과의
+`*-runtime.json`에서 확인한다. 고정 시드도 하드웨어·런타임이 다르면 동일 출력을 보장하지 않는다.
+
+**CPU 스레드는 서버별 준비가 필요하다.** 프로필의 `runtime.cpu_threads=10`은 의도한
+값을 기록할 뿐 API로 강제하지 않는다. 현재 서버는 각 모델의
+`~/.lmstudio/hub/models/<모델 키>/model.yaml`에 있는 `config.operation.fields` 목록에
+다음 항목을 설정했다. 다른 서버에서는 기존 설정을 보존하면서 이 항목을 추가·변경하고
+모델을 다시 로드한 뒤 실제 값을 확인한다. 실행 중인 실험의 설정은 바꾸지 않는다.
+
+```yaml
+# config.operation.fields 목록의 항목 하나
+- key: llm.prediction.llama.cpuThreads
+  value: 10
+```
+
+실제 값은 `prediction_config.cpuThreads`로 기록된다. 스레드 값이 10과 다르다는 이유만으로
+실행을 막지는 않는다. Hub 모델 정의를 갱신한 뒤에는 이 기본값도 다시 확인한다.
+
+## 5. 실험 과정과 대화 관리
+
+```text
+direct:   PRD + 인터페이스 ──────────────────────→ 코드 생성
+modeling: PRD → 도메인 모델 1회 생성·고정
+                PRD + 인터페이스 + 도메인 모델 → 코드 생성
+
+코드 생성 → 파일 반영 → 단위 테스트
+                         ├─ 모두 통과 → 종료
+                         └─ 미통과 → 최신 상태로 입력 재구성 → 코드 수정 → 다시 검증
+                                      최대 30회 수정 후 미통과해도 종료
+```
+
+인터페이스는 [generate/config.py](generate/config.py)에 있는 모듈 경로·클래스·함수·인자 계약이다.
+코드 생성·수정에 제공하며, 도메인 모델 생성에는 PRD만 제공한다.
+
+각 수정 요청에는 **고정 PRD·인터페이스·도메인 모델 + 현재 생성 코드 전체 + 최신 검증 결과 +
+수정 이력**을 넣는다. 이전 대화를 계속 붙이거나 별도 LLM 요약을 호출하지 않는다.
+최근 두 회차는 자세히, 이전 회차는 구조화한 짧은 이력으로 전달한다. 입력이 크면
+오래된 이력 → 최근 이력 → 오류 본문 순으로 줄인다. 필수 입력도 들어가지 않으면
+PRD·도메인 모델·코드를 자르지 않고 `context_limit`으로 중단한다.
+
+수정 요청은 변경할 파일의 **전체 내용**을 `<file path="src/...">...</file>`로 받아 적용한다.
+도메인 모델, 요구사항, 제공 데이터, 채점 테스트는 수정하지 않는다. 형식 오류, 빈 응답,
+잘린 응답, 동일 코드 응답도 수정 예산을 소비한다. 형식 오류는 코드를 적용하지 않으며,
+현재 코드 해시와 일치하는 이전 검증이 있으면 그 결과를 유지한다. 최고 점수 코드로
+자동 복구하지 않고 최신 코드에서 다음 수정을 계속한다.
+
+프로젝트가 바뀌면 해당 배치가 로드한 모델을 해제하고 **새 식별자·새 인스턴스**로 로드한다.
+가중치는 동일한 학습 완료 파일을 다시 사용하며 재학습하지 않는다. LM Studio 서버나
+OS 파일 캐시를 재시작하는 것은 아니다. `both`의 두 방식과 `--iters`의 반복들은
+각각 독립 입력·출력을 사용하지만 같은 프로젝트 안에서는 모델 인스턴스를 공유한다.
+
+## 6. 실행 옵션
+
+| 옵션 | 기본값 | 의미 |
+|---|---|---|
+| `--pipeline direct\|modeling\|both` | `direct` | 도메인 모델 없이 / 경유 / 두 방식 모두 |
+| `--iters N` | `1` | 모델·프로젝트·방식별 독립 실험 횟수. 1 이상 |
+| `--max-repairs N` | `30` | 최초 생성 이후 수정 요청 횟수. 0~30 |
+| `--run-name NAME` | 자동 생성 | 새 결과 폴더 이름. 같은 이름의 결과가 있으면 중단 |
+| `--dry-run` | 꺼짐 | 실행 계획만 출력. 모델 호출·로드·결과 파일 생성 없음 |
+
+`--run-name`은 영문·숫자로 시작하는 100자 이내 이름이며 영문·숫자·`_`·`-`·`.`을 사용할 수 있다.
+자동 이름에는 한국 시간과 임의 문자열이 포함된다. `--help`로 CLI 도움말을 볼 수 있다.
+
+```bash
+./run_lmstudio.sh --pipeline modeling                     # 6개 실험
+./run_lmstudio.sh --pipeline both --max-repairs 30 --iters 1  # 12개 실험
+./run_lmstudio.sh --max-repairs 0                         # 최초 생성만 평가
+./run_lmstudio.sh --pipeline both --iters 3               # 36개 독립 실험
+./run_lmstudio.sh --run-name baseline-01                  # 사용하지 않은 이름
+```
+
+30회는 시간 제한이 아니다. 프로젝트별 실행 시간 상한이나 `--unlimited` 옵션은 없다.
+두 모델과 37·44·29 순서는 배치에 고정되어 있고, 모델·프로젝트 선택 옵션은 없다.
+
+### 단일 모델·프로젝트만 수동 실행하기
+
+배치를 실행하지 않고 모델이 비어 있을 때만 아래 흐름을 사용한다.
+
+```bash
+export PRDBENCH_PYTHON="${PRDBENCH_PYTHON:-/home/kg/.venvs/prdbench/bin/python}"
+"$PRDBENCH_PYTHON" generate/prepare_lmstudio.py Qwen3-Coder-30B
+"$PRDBENCH_PYTHON" generate/generate.py Qwen3-Coder-30B 37 vanilla 1 qwen-37-manual --max-repairs 30
+"$PRDBENCH_PYTHON" eval/evaluate.py Qwen3-Coder-30B qwen-37-manual
+lms unload qus-prdbench-qwen
+```
+
+`generate.py`에 `--modeling`을 붙이면 도메인 모델을 경유한다. gpt-oss는 모델 선택 이름을
+`gpt-oss-20b`로, 마지막 해제 식별자를 `qus-prdbench-gptoss`로 바꾼다.
+수동 준비는 같은 식별자의 모델을 검증 후 재사용할 수 있고, 자동 해제하지 않는다.
+따라서 수동 실행으로 프로젝트별 재로드 조건을 맞추려면 매번 위 해제·준비 과정을 거친다.
+
+## 7. 결과는 어디서 보는가
+
+시작 시 터미널에 `BATCH_DIR=...`가 출력된다.
+
+```text
+output/
+├─ batches/<실행 이름>/
+│  ├─ run.log                         전체 진행 로그
+│  ├─ status.json                     현재 배치 단계·완료 작업·오류
+│  ├─ manifest.json                   시작 조건·프로필·커밋·재로드 정책
+│  ├─ qwen-37-runtime.json            프로젝트별 실제 모델 로드 설정
+│  ├─ logs/                           생성·평가 명령별 로그
+│  └─ summary.csv / summary.json      모델별 집계를 합친 결과
+└─ <모델 선택 이름>/<실행 이름>/
+   ├─ gen.config                      프로젝트 시작 시 설정과 커밋
+   ├─ summary.csv / summary.json      해당 모델 집계
+   └─ 37-vanilla-direct-iter-0/
+      ├─ run.json                     상태·수정 횟수·최초/최고/최종 점수
+      ├─ result.json                  유효한 최신 단위 테스트 결과
+      ├─ src/                         최신 생성 코드
+      ├─ inputs.json                  고정 입력
+      ├─ codegen_response.txt         최초 코드 응답
+      └─ rounds/000/, 001/, ...        최초 생성과 수정 회차별 기록
+```
+
+`rounds/000`은 최초 생성, `001`은 첫 수정이다. 각 회차에서 다음을 확인할 수 있다.
+
+| 파일 | 용도 |
+|---|---|
+| `prompt.txt` / `response.txt` | 모델에 실제 보낸 입력 / 받은 코드 응답 |
+| `src/` | 해당 회차 코드 스냅샷 |
+| `usage.json` | 토큰 수, 요청 설정, HTTP 시도·재시도 횟수, 종료 이유 |
+| `context.json` | 입력 토큰 예산과 줄인 이력·오류 발췌 정보 |
+| `record.json` | 형식 오류, 변경 파일, 검증 재사용 회차, 생성·평가 시간 |
+| `validation.json` | 지표별 판정과 실패 테스트 로그 경로 |
+| 명령별 하위 폴더 | 실제 검증 시 `stdout.log`, `stderr.log`, `junit.xml`, `case.json` |
+
+`modeling` 방식에는 루트에 `modeling-prompt.txt`, `modeling.txt`, `modeling-usage.json` 등이 추가된다.
+`modeling.json`은 응답에서 JSON을 파싱할 수 있을 때 저장한다. 중단된 회차는 완료한 단계의
+파일만 존재할 수 있다. 유효한 검증이 없으면 `result.json`도 없고 점수는 `null`이다.
+
+전체 `summary`는 모델 하나의 작업이 모두 끝나 집계하거나 배치가 종료·중단될 때 생성된다.
+실행 중에는 먼저 `run.log`, 개별 `run.json`과 `result.json`을 본다.
+집계의 `passed`는 **최종 점수**이며 `best_passed`와 다를 수 있다. CSV의 빈 점수 칸은 미측정이다.
+서버가 제공하지 않은 토큰 통계도 0으로 추정하지 않고 `null`로 기록한다.
+
+| 실험 상태 | 의미와 다음 동작 |
+|---|---|
+| `running` | 생성·수정·검증 중 |
+| `passed` | 현재 채점 대상 명령 전체 통과. 다음 작업 진행 |
+| `repair_limit` | 수정 예산 소진, 미통과. 결과 저장 후 다음 작업 진행 |
+| `context_limit`, `api_error`, `modeling_error`, `validation_error`, `integrity_error` | 입력·API·모델링·평가기·무결성 문제. 배치 중단 |
+| `interrupted` | 종료 신호로 중단 |
+
+배치의 `completed`는 모든 작업을 처리했다는 뜻이며, 모든 프로젝트의 `passed`를 의미하지 않는다.
+skip, 테스트 수집 0건, import/수집 오류, timeout, 비정상 종료는 통과로 인정하지 않는다.
+
+## 8. 환경 변수와 문제 확인
+
+| 변수 | 기본값·용도 |
+|---|---|
+| `PRDBENCH_PYTHON` | `/home/kg/.venvs/prdbench/bin/python`. 셸에서 export |
+| `LMSTUDIO_API_BASE` | `http://127.0.0.1:1234/v1` |
+| `LMSTUDIO_API_KEY` | 서버에서 인증을 켰을 때 지정. HTTP와 SDK에 함께 사용 |
+| `LMSTUDIO_SDK_PATH` | 앞서 설명한 SDK `dist/index.mjs` 경로 |
+| `LMSTUDIO_QWEN_MODEL_ID` | 수동 실행 기본 `qus-prdbench-qwen` |
+| `LMSTUDIO_GPTOSS_MODEL_ID` | 수동 실행 기본 `qus-prdbench-gptoss` |
+
+`LMSTUDIO_*`는 셸 또는 루트 `.env`에서 지정할 수 있다. 배치는 프로젝트마다 모델 식별자를
+자동 생성하므로 마지막 두 변수는 수동 실행에 사용한다. 인증 키는 커밋하지 않는다.
+
+| 현상 | 확인할 내용 |
+|---|---|
+| 모델이 이미 로드돼 있다는 오류 | `lms ps --json`. 다른 실험이 사용 중이면 종료 후 시작 |
+| SDK helper 오류 | `node` 설치, SDK 경로, LM Studio 서버와 인증 설정 |
+| runtime mismatch | 모델 키·양자화·로드 설정이 프로필과 일치하는지 확인 |
+| `format_error` 반복 | `response.txt`, `record.json`. 중복 파일, 남는 파일 태그, 미완성 블록 등 확인 |
+| 점수가 계속 같음 | 실패 지표와 실제 코드 변경을 확인. 동일 코드·형식 오류는 이전 검증을 유지할 수 있음 |
+| `context_limit` | `run.json`의 `error`와 회차 `record.json` 확인. `context.json`은 입력 구성에 성공한 회차에만 존재할 수 있음. 설정 변경은 실험 종료 후 새 실행으로 비교 |
+| `repair_limit` | 실행기 장애가 아니라 정해진 수정 예산 내 미통과 결과 |
+
+중단은 실행 터미널의 `Ctrl+C`로 요청한다. 자식 실행을 중단하고 배치가 소유한 모델의
+정리를 시도한다. 로드·해제 중에는 해당 단계가 끝날 때까지 기다릴 수 있다.
+강제 종료에는 정리가 보장되지 않는다. 자동 재개는 지원하지 않으며 새 실행 이름으로 시작한다.
+
+## 9. 개발 검증과 재현 기록
+
+```bash
+"${PRDBENCH_PYTHON:-/home/kg/.venvs/prdbench/bin/python}" -m pytest -q
+```
+
+이 검증은 `tests/`의 실행기 회귀 테스트이며 실제 모델을 호출하지 않는다.
+소규모 생성 코드와 로컬 HTTP/SDK 대역으로 수정 루프·평가·정리 동작을 확인한다.
+`benchmark/`의 채점 테스트는 생성 코드가 필요하므로 실험 중 평가기가 따로 실행한다.
+
+실험을 재현하려면 코드 커밋, 프로필, 모델 키·양자화, 실제 로드 설정, 서버의 CPU 스레드,
+SDK·LM Studio 런타임, 실행 옵션을 함께 남긴다. 가능하면 커밋 후 새 배치를 시작한다.
+실행 중 코드를 변경하면 다음 프로젝트가 변경된 코드를 읽을 수 있다.
+
+Git에는 실행기·테스트·모델 프로필·문서를 공유한다. `output/`, `.env`, 가상환경,
+별도 SDK 설치 폴더, Python/pytest 캐시, 배치 잠금, `.superpowers/`의 로컬 백업·진단 기록은
+제외한다. 결과가 필요하면 Git push와 별개로 `output/`의 해당 실행 폴더를 보관한다.
+`docs/superpowers/`는 과거 설계·구현 기록이며, 현재 실행 방법은 이 문서와 실제 코드가 기준이다.

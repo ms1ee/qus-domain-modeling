@@ -1,0 +1,92 @@
+"""Reconstruct a single request from authoritative current artifacts."""
+import json
+
+from prompt import STATE_CODE_RULES
+
+
+class ContextBudgetError(ValueError):
+    pass
+
+
+def _excerpt(text, limit):
+    if len(text) <= limit:
+        return text
+    marker = '\n[excerpt; full output is saved in the round logs]\n'
+    head = (limit - len(marker)) // 3
+    tail = limit - len(marker) - head
+    return text[:head] + marker + text[-tail:]
+
+
+def _validation_view(validation, limit):
+    if validation is None:
+        return {'evaluated': False, 'message': 'No valid test result yet.'}
+    view = {key: validation.get(key) for key in ('passed', 'total', 'source_hash')}
+    view['items'] = {}
+    for metric, item in validation.get('items', {}).items():
+        cases = []
+        for case in item['cases']:
+            if case['status'] != 'pass':
+                cases.append({'node': case.get('node'), 'command': case.get('command'),
+                              'status': case['status'], 'message': _excerpt(case.get('message', ''), limit)})
+        view['items'][metric] = {'status': item['status'], 'failures': cases}
+    return view
+
+
+def _history_view(history, mode):
+    if mode == 'none':
+        return []
+    rows = []
+    for index, item in enumerate(history):
+        recent = index >= len(history) - 2
+        if not recent and mode == 'recent':
+            continue
+        keys = ('round', 'passed', 'total', 'changed_paths', 'response_status', 'failed_items')
+        row = {key: item.get(key) for key in keys}
+        if recent:
+            row.update(source_hash=item.get('source_hash'), repeat_of_round=item.get('repeat_of_round'))
+        rows.append(row)
+    return rows
+
+
+def build_prompt(fixed: dict, files: dict[str, str], validation: dict | None, history: list[dict], *,
+                 format_error: str | None = None, history_mode='full', error_chars=6000) -> str:
+    sections = [STATE_CODE_RULES,
+                f'Code request round {fixed.get("round", 0)}; repair limit {fixed.get("max_repairs", 30)}.',
+                '<PRD>\n' + fixed['prd'] + '\n</PRD>',
+                '<Interface>\n' + fixed['interface'] + '\n</Interface>']
+    if fixed.get('domain_model'):
+        sections.append('<DomainModel>\n' + fixed['domain_model'] + '\n</DomainModel>')
+    sections.append('<ProvidedFiles>\n' + json.dumps(fixed.get('provided_files', {}), sort_keys=True,
+                                                    ensure_ascii=False) + '\n</ProvidedFiles>')
+    sections.append('<CurrentCode>\n' + '\n'.join(
+        f'<file path="{path}">\n{files[path]}\n</file>' for path in sorted(files)) + '\n</CurrentCode>')
+    sections.append('<LatestValidation>\n' + json.dumps(_validation_view(validation, error_chars),
+                                                       ensure_ascii=False, indent=2) + '\n</LatestValidation>')
+    if format_error:
+        sections.append('<ResponseFeedback>\n' + _excerpt(format_error, error_chars) + '\n</ResponseFeedback>')
+    sections.append('<RepairHistory>\n' + json.dumps(_history_view(history, history_mode),
+                                                    ensure_ascii=False) + '\n</RepairHistory>')
+    return '\n\n'.join(sections)
+
+
+def fit_prompt(fixed: dict, files: dict, validation: dict | None, history: list[dict], *, preflight,
+               format_error: str | None = None) -> dict:
+    policies = [('full', 6000), ('recent', 6000), ('none', 6000), ('none', 1500), ('none', 400)]
+    for mode, chars in policies:
+        prompt = build_prompt(fixed, files, validation, history, format_error=format_error,
+                              history_mode=mode, error_chars=chars)
+        measured = preflight(prompt)
+        context = measured['runtime']['context_length']
+        budget = context - fixed.get('output_reserve_tokens', 8192) - fixed.get('template_margin_tokens', 1024)
+        if measured['tokens'] <= budget:
+            omissions = []
+            if mode != 'full':
+                omissions.append('older_history')
+            if mode == 'none':
+                omissions.append('recent_history')
+            if chars < 6000:
+                omissions.append(f'failure_excerpts_{chars}_characters')
+            return {'prompt': prompt, 'rendered_tokens': measured['tokens'], 'input_budget': budget,
+                    'omissions': omissions, 'runtime': measured['runtime']}
+    raise ContextBudgetError(f'Mandatory input exceeds context budget: {measured["tokens"]} > {budget}/{context}. '
+                             'PRD, interface, domain model and current code were preserved.')

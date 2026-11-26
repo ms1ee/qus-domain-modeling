@@ -1,7 +1,8 @@
 import os
+import time
 from abc import ABC, abstractmethod
-import anthropic
 from config import *
+from context import ContextBudgetError
 
 
 class LLM(ABC):
@@ -13,6 +14,8 @@ class LLM(ABC):
 class Claude(LLM):
     # No refusal fallbacks: the model must not change during the experiment.
     def __init__(self, model_id):
+        import anthropic
+
         if not os.getenv("ANTHROPIC_API_KEY"):
             print("Error: ANTHROPIC_API_KEY doesn't exist.")
             exit(1)
@@ -47,7 +50,102 @@ class Claude(LLM):
         return text, usage
 
 
-PROVIDERS = {"anthropic": Claude}
+class LMStudio(LLM):
+    def __init__(self, model_id):
+        import httpx
+        import openai
+        import lmstudio_runtime
+
+        self.profile = lmstudio_runtime.load_profile(model_id)
+        base_url, self.model_id = lmstudio_runtime.connection(self.profile)
+        self.runtime = lmstudio_runtime.Runtime(self.profile, base_url, self.model_id)
+        self._refresh_runtime()
+        api = self.profile['api']
+        self.client = openai.OpenAI(
+            base_url=base_url, api_key=os.getenv('LMSTUDIO_API_KEY', 'lm-studio'),
+            max_retries=0, timeout=httpx.Timeout(api['response_timeout_seconds'],
+                                               connect=api['connect_timeout_seconds']))
+
+    def _refresh_runtime(self):
+        self._record_runtime(self.runtime.inspect())
+
+    def _record_runtime(self, state):
+        from lmstudio_runtime import validate_runtime
+
+        validate_runtime(self.profile, state)
+        if state['identifier'] != self.model_id:
+            raise ValueError('LM Studio runtime mismatch: identifier')
+        self.settings = {'sampling': self.profile['sampling'], 'api': self.profile['api'], 'runtime': state}
+
+    def chat(self, user_prompt):
+        import openai
+
+        api = self.profile['api']
+        sampling = dict(self.profile['sampling'])
+        request = dict(model=self.model_id, messages=[{'role': 'user', 'content': user_prompt}],
+                       max_tokens=api['max_tokens'], temperature=sampling.pop('temperature'),
+                       top_p=sampling.pop('top_p'), seed=sampling.pop('seed'), extra_body=sampling)
+        http_attempts = 0
+        input_tokens = budget = None
+        try:
+            for attempt in range(api['max_retries'] + 1):
+                # Revalidate before every HTTP attempt, including after retry backoff.
+                preflight = self.runtime.preflight(user_prompt)
+                self._record_runtime(preflight['runtime'])
+                input_tokens = preflight['tokens']
+                context = self.settings['runtime']['context_length']
+                budget = context - api['output_reserve_tokens'] - api['template_margin_tokens']
+                if input_tokens > budget:
+                    raise ContextBudgetError(f'Input needs {input_tokens} tokens; context input budget is {budget}/{context}. '
+                                     'PRD/domain model was not truncated. Prepare a larger context before retrying.')
+                try:
+                    http_attempts += 1
+                    message = self.client.chat.completions.create(**request)
+                    break
+                except (openai.APIConnectionError, openai.APIStatusError) as error:
+                    status = getattr(error, 'status_code', None)
+                    retryable = status is None or status in (408, 409, 429) or status >= 500
+                    if not retryable or attempt == api['max_retries']:
+                        raise
+                    print(f'  [LLM] Transient API failure; retry {attempt + 1}/{api["max_retries"]}')
+                    time.sleep(2 ** attempt)
+            if not message.choices:
+                raise RuntimeError('LM Studio returned no completion choices')
+        except BaseException as error:
+            # Known transport counts survive failures; server token usage is unknown.
+            error.request_usage = {
+                'model': self.model_id, 'http_attempts': http_attempts,
+                'retries': max(0, http_attempts - 1), 'response_complete': False,
+                'input_tokens': None, 'output_tokens': None, 'reasoning_tokens': None,
+                'cache_read_tokens': None, 'rendered_input_tokens': input_tokens,
+                'input_budget_tokens': budget, 'settings': self.settings,
+            }
+            raise
+        choice = message.choices[0]
+        # Reasoning is not program output. Never concatenate reasoning_content.
+        text = choice.message.content or ''
+        u = message.usage
+        usage = {
+            'model': message.model, 'request_id': getattr(message, '_request_id', None),
+            'stop_reason': 'max_tokens' if choice.finish_reason == 'length' else choice.finish_reason,
+            'finish_reason': choice.finish_reason,
+            'response_complete': choice.finish_reason == 'stop' and bool(text.strip()),
+            'input_tokens': getattr(u, 'prompt_tokens', None),
+            'output_tokens': getattr(u, 'completion_tokens', None),
+            'cache_read_tokens': getattr(getattr(u, 'prompt_tokens_details', None), 'cached_tokens', None),
+            'cache_write_tokens': None,  # Not supplied by the OpenAI-compatible response.
+            'reasoning_tokens': getattr(getattr(u, 'completion_tokens_details', None), 'reasoning_tokens', None),
+            'retries': attempt, 'http_attempts': http_attempts, 'rendered_input_tokens': input_tokens,
+            'input_budget_tokens': budget, 'settings': self.settings,
+        }
+        print('  [LLM] stop_reason=%s in=%s out=%s' %
+              (usage['stop_reason'], usage['input_tokens'], usage['output_tokens']))
+        if not usage['response_complete']:
+            print('  [LLM Warning] Incomplete or empty answer; inspect usage.json before comparing scores')
+        return text, usage
+
+
+PROVIDERS = {"anthropic": Claude, "lmstudio": LMStudio}
 
 
 def make_llm(model):
@@ -55,4 +153,6 @@ def make_llm(model):
     if provider not in PROVIDERS:
         print("Unsupported provider: %s" % provider)
         exit(1)
-    return PROVIDERS[provider](model_id)
+    instance = PROVIDERS[provider](model_id)
+    instance.model_name = model
+    return instance

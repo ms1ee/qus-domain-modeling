@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 import os, re, sys, json, time, shutil, argparse, subprocess
+from pathlib import Path
+import signal
 from dotenv import load_dotenv
 from config import *
 from prompt import *
 from llm import make_llm
+from artifacts import snapshot_hashes, write_json, ArtifactIntegrityError, source_digest
+from session import create_state
+from repair import run_trial, response_complete, finish_trial, evaluation
+from context import ContextBudgetError
 
 load_dotenv(os.path.join(ROOT_DIR, ".env"))
 
@@ -39,45 +45,72 @@ def extract_files(response):
     return files, rejected
 
 
-def run_once(llm, task, prd, use_modeling, run_dir):
-    usage = {}
-    modeling_section = ""
-    if use_modeling:
-        modeling_prompt = MODELING_PROMPT % prd
-        print("  [*] Modeling")
-        modeling, usage["modeling"] = llm.chat(modeling_prompt)
-        write_file(os.path.join(run_dir, "modeling.txt"), modeling)
-        model = parse_json(modeling)
-        usage["modeling"]["json_ok"] = model is not None
-        if model is None:
-            # keep the run: pass the raw answer as is and flag it
-            print("  [Warning] Domain model is not valid JSON; passing raw text")
-            modeling_section = MODELING_SECTION % modeling.strip()
+def run_once(llm, task, prd, use_modeling, run_dir, *, max_repairs=30, prd_name='vanilla', nth=0):
+    if not 0 <= max_repairs <= 30:
+        raise ValueError('max_repairs must be between 0 and 30')
+    run_dir = Path(run_dir)
+    if run_dir.exists() and any(run_dir.iterdir()):
+        raise FileExistsError(f'Trial directory is not empty; use a new run name: {run_dir}')
+    benchmark = Path(BENCHMARK_DIR) / task
+    inputs = snapshot_hashes(benchmark)
+    identity = {'task': task, 'prd': prd_name, 'pipeline': 'modeling' if use_modeling else 'direct',
+                'iter': nth, 'model': getattr(llm, 'model_name', getattr(llm, 'model_id', type(llm).__name__))}
+    state = create_state(run_dir, identity, max_repairs=max_repairs, inputs={'benchmark': inputs},
+                         settings=getattr(llm, 'settings', {}))
+    try:
+        evaluation.ensure_test_runner()
+        provided = benchmark / 'src'
+        if provided.is_dir():
+            shutil.copytree(provided, run_dir / 'src')
         else:
-            write_file(os.path.join(run_dir, "modeling.json"), json.dumps(model, indent=2))
-            modeling_section = MODELING_SECTION % json.dumps(model, indent=2)
+            (run_dir / 'src').mkdir()
+        domain = ''
+        if use_modeling:
+            state['phase'] = 'modeling'
+            write_json(run_dir / 'run.json', state)
+            modeling_prompt = MODELING_PROMPT % prd
+            (run_dir / 'modeling-prompt.txt').write_text(modeling_prompt, encoding='utf-8')
+            print('  [*] Modeling (once; frozen for all repairs)', flush=True)
+            started = time.monotonic()
+            try:
+                modeling, usage = llm.chat(modeling_prompt)
+            except BaseException as error:
+                if getattr(error, 'request_usage', None) is not None:
+                    state['modeling_usage'] = error.request_usage
+                    write_json(run_dir / 'modeling-usage.json', error.request_usage)
+                raise
+            finally:
+                state['modeling_seconds'] = time.monotonic() - started
+            state['modeling_usage'] = usage
+            write_json(run_dir / 'modeling-usage.json', usage)
+            (run_dir / 'modeling.txt').write_text(modeling, encoding='utf-8')
+            if not response_complete(modeling, usage):
+                return finish_trial(run_dir, state, 'modeling_error', error='Empty or incomplete domain model')
+            model = parse_json(modeling)
+            usage['json_ok'] = model is not None
+            domain = json.dumps(model, indent=2) if model is not None else modeling.strip()
+            if model is not None:
+                write_json(run_dir / 'modeling.json', model)
+        if snapshot_hashes(benchmark) != inputs:
+            raise ArtifactIntegrityError('Benchmark inputs changed during preparation/modeling')
+        api = getattr(llm, 'profile', {}).get('api', {})
+        fixed = {'prd': prd, 'interface': BENCHMARKS[task]['interface'], 'domain_model': domain,
+                 'provided_files': {'src/' + name: digest for name, digest in snapshot_hashes(provided).items()},
+                 'output_reserve_tokens': api.get('output_reserve_tokens', 8192),
+                 'template_margin_tokens': api.get('template_margin_tokens', 1024)}
+    except BaseException as error:
+        status = ('interrupted' if isinstance(error, KeyboardInterrupt) else
+                  'integrity_error' if isinstance(error, ArtifactIntegrityError) else
+                  'context_limit' if isinstance(error, ContextBudgetError) else
+                  'api_error' if state['phase'] == 'modeling' else 'validation_error')
+        finish_trial(run_dir, state, status, error=error)
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            raise
+        return state
+    return run_trial(llm, identity=identity, fixed=fixed, run_dir=run_dir, max_repairs=max_repairs, state=state)
 
-    codegen_prompt = CODEGEN_PROMPT % (prd, modeling_section, BENCHMARKS[task]["interface"])
-    print("  [*] Code generation")
-    response, usage["codegen"] = llm.chat(codegen_prompt)
-    write_file(os.path.join(run_dir, "codegen_response.txt"), response)
 
-    files, rejected = extract_files(response)
-    for path, content in files.items():
-        write_file(os.path.join(run_dir, path), content)
-    # provided files (benchmark/<task>/src/, e.g. data) overwrite any generated copy
-    provided = os.path.join(BENCHMARK_DIR, task, "src")
-    if os.path.isdir(provided):
-        shutil.copytree(provided, os.path.join(run_dir, "src"), dirs_exist_ok=True)
-    usage["files"] = sorted(files)
-    usage["rejected_paths"] = rejected
-    print("  [*] Wrote %d file(s) under src/%s"
-          % (len(files), ", rejected %s" % rejected if rejected else ""))
-    # usage.json marks a finished run
-    write_file(os.path.join(run_dir, "usage.json"), json.dumps(usage, indent=2))
-
-
-def log_gen_info(outdir, args):
+def log_gen_info(outdir, args, llm):
     try:
         commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT_DIR, check=True,
                                 capture_output=True, text=True).stdout.strip()
@@ -85,10 +118,14 @@ def log_gen_info(outdir, args):
         commit = "none"
     with open(os.path.join(outdir, "gen.config"), "a") as f:
         f.write("Model: %s %s\n" % (args.model, MODELS[args.model][1]))
-        f.write("Effort: %s, Max tokens: %d\n" % (EFFORT, MAX_TOKENS))
+        if MODELS[args.model][0] == "lmstudio":
+            f.write("LM Studio settings: %s\n" % json.dumps(llm.settings, sort_keys=True))
+        else:
+            f.write("Effort: %s, Max tokens: %d\n" % (EFFORT, MAX_TOKENS))
         f.write("Task: %s, PRD: %s, Pipeline: %s, Iterations: %d\n"
                 % (args.task, args.prd, "modeling" if args.modeling else "direct", args.iters))
         f.write("Start Time: %d\n" % int(time.time()))
+        f.write("Max repairs after initial generation: %d\n" % getattr(args, 'max_repairs', 30))
         f.write("Commit Hash: %s\n\n" % commit)
 
 
@@ -100,7 +137,14 @@ def main():
     parser.add_argument("iters", type=int)
     parser.add_argument("outdir", help="output/<model>/<outdir>")
     parser.add_argument("--modeling", action="store_true", help="PRD -> Modeling -> Code")
+    parser.add_argument('--max-repairs', type=int, default=30, help='Repair requests after initial generation (default: 30)')
     args = parser.parse_args()
+    if not 0 <= args.max_repairs <= 30 or args.iters < 1:
+        parser.error('--max-repairs must be between 0 and 30 and iters must be positive')
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, interrupt)
 
     prd_path = os.path.join(BENCHMARK_DIR, args.task, "%s_PRD.md" % args.prd)
     if not os.path.isfile(prd_path):
@@ -112,16 +156,25 @@ def main():
     llm = make_llm(args.model)
     outdir = os.path.join(OUTDIR_BASE, args.model, args.outdir)
     os.makedirs(outdir, exist_ok=True)
-    log_gen_info(outdir, args)
+    log_gen_info(outdir, args, llm)
 
     pipeline = "modeling" if args.modeling else "direct"
     for i in range(args.iters):
         run_dir = os.path.join(outdir, "%s-%s-%s-iter-%d" % (args.task, args.prd, pipeline, i))
-        if os.path.isfile(os.path.join(run_dir, "usage.json")):
-            print("[*] Skip %s (done)" % run_dir)
-            continue
+        state_path = Path(run_dir) / 'run.json'
+        if state_path.exists():
+            previous = json.loads(state_path.read_text())
+            if (previous['status'] in ('passed', 'repair_limit')
+                    and previous['max_repairs'] == args.max_repairs
+                    and evaluation.managed_result(run_dir)['status'] == previous['status']):
+                print('[*] Skip %s (%s)' % (run_dir, previous['status']))
+                continue
+            raise RuntimeError('Existing trial is incomplete or differs from this request; use a new outdir: ' + run_dir)
         print("[*] Generating %s" % run_dir)
-        run_once(llm, args.task, prd, args.modeling, run_dir)
+        state = run_once(llm, args.task, prd, args.modeling, run_dir, max_repairs=args.max_repairs,
+                         prd_name=args.prd, nth=i)
+        if state['status'] not in ('passed', 'repair_limit'):
+            raise SystemExit(1)
 
     print("All generations done!")
 

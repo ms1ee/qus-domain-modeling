@@ -50,3 +50,15 @@ The following domain model was derived from the PRD. Use it as a reference for t
 %s
 </DomainModel>
 """
+
+STATE_CODE_RULES = """Implement the Python 3.10 program specified by the PRD and Interface below using only the standard library.
+Follow module paths, class/function names, signatures, and return values exactly. Implement all functional requirements.
+The supplied tests, requirements, domain model and provided data are immutable. Do not write or weaken tests.
+The CurrentCode section is the complete CURRENT generated source, not a suggestion or an old conversation.
+Use the observed validation failures to diagnose the cause and repair the implementation. Do not claim success without executable code.
+On the initial request, produce the complete program. On a repair request, return only changed/new files, with their COMPLETE contents.
+Use <file path="src/path/to/file.py">file content</file> for each file.
+To remove an existing generated file, use <delete path="src/path/to/file.py"/>. Do not delete provided files.
+Preserve every file that is not explicitly updated or deleted. Never return a patch/diff as file content.
+Do not ask questions; implement the requested changes in this response.
+"""
