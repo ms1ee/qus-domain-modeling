@@ -7,23 +7,32 @@ import globalvar as gl
 from rider import Rider
 from order_model import Order
 
+MAX_TICKS = 500
+
 
 def norm(s):
     return re.sub(r"\s+", "", s).lower()
+
+
+def move_until(rider, done):
+    for _ in range(MAX_TICKS):
+        if done():
+            return
+        rider.move()
+
 
 def test_rider_history():
     # Metrics 6.3a, 6.3b
     gl._init()
     rider = Rider(1)
-    order = Order(res_pos=(100, 100), cus_pos=(200, 200))
+    # grid cell centers (PRD 2.3), unchanged by coordinate conversion
+    order = Order(res_pos=(150, 150), cus_pos=(250, 250))
     
-    # Assign order and transition states
+    # Assign order and move until delivered
     rider.orders.append(order)
     rider.move() # idle -> to_pickup
-    rider.x, rider.y = 100, 100
-    rider.move() # to_pickup -> to_deliver
-    rider.x, rider.y = 200, 200
-    rider.move() # to_deliver -> idle
+    move_until(rider, lambda: rider.state != 1) # to_pickup -> to_deliver
+    move_until(rider, lambda: rider.state != 2) # to_deliver -> idle
     
     assert len(rider.log) >= 4 # spawn, accepted, arrived_at_merchant, delivered
     
