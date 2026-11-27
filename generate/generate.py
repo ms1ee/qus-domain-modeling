@@ -59,7 +59,8 @@ def run_once(llm, task, prd, use_modeling, run_dir):
 
     codegen_prompt = CODEGEN_PROMPT % (prd, modeling_section, BENCHMARKS[task]["interface"])
     print("  [*] Code generation")
-    response, usage["codegen"] = llm.chat(codegen_prompt)
+    # modeling: the domain model differs per iteration, so the prompt never repeats
+    response, usage["codegen"] = llm.chat(codegen_prompt, cache=not use_modeling)
     write_file(os.path.join(run_dir, "codegen_response.txt"), response)
 
     files, rejected = extract_files(response)

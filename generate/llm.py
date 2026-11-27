@@ -19,12 +19,16 @@ class Claude(LLM):
         self.client = anthropic.Anthropic()
         self.model_id = model_id
 
-    def chat(self, user_prompt):
+    def chat(self, user_prompt, cache=True):
+        # cache: prompt repeats across iterations (1h TTL: an iteration can take over 5 min)
+        block = {"type": "text", "text": user_prompt}
+        if cache:
+            block["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
         with self.client.messages.stream(
             model=self.model_id,
             max_tokens=MAX_TOKENS,
             output_config={"effort": EFFORT},
-            messages=[{"role": "user", "content": user_prompt}],
+            messages=[{"role": "user", "content": [block]}],
         ) as stream:
             message = stream.get_final_message()
             req_id = getattr(message, "_request_id", None) or \
@@ -40,8 +44,9 @@ class Claude(LLM):
             "cache_read_tokens": u.cache_read_input_tokens or 0,
             "cache_write_tokens": u.cache_creation_input_tokens or 0,
         }
-        print("  [LLM] stop_reason=%s in=%d out=%d"
-              % (usage["stop_reason"], usage["input_tokens"], usage["output_tokens"]))
+        print("  [LLM] stop_reason=%s in=%d cache_w=%d cache_r=%d out=%d"
+              % (usage["stop_reason"], usage["input_tokens"], usage["cache_write_tokens"],
+                 usage["cache_read_tokens"], usage["output_tokens"]))
         if message.stop_reason in ("max_tokens", "refusal"):
             print("  [LLM Warning] stop_reason=%s (incomplete answer)" % message.stop_reason)
         return text, usage
