@@ -12,6 +12,10 @@ import pytest
 def isolated_batch(tmp_path, monkeypatch):
     import run_batch
     monkeypatch.setattr(run_batch, 'ROOT', tmp_path)
+    for task in ('37', '44', '29'):
+        inputs = tmp_path / 'benchmark' / task
+        inputs.mkdir(parents=True)
+        (inputs / 'vanilla_PRD.md').write_text('fixture requirements')
     plan = {'run_name': 'chosen-name', 'models': ['Qwen3-Coder-30B'],
             'projects': ['37'], 'pipelines': ['direct'], 'iters': 1, 'prd': 'vanilla'}
     instances = []

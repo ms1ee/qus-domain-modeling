@@ -44,6 +44,17 @@ python eval/evaluate.py Claude-Haiku-5.5 vanilla10-1124
 프로젝트마다 모델을 해제하고 새 인스턴스로 로드한다. 테스트 미통과 상태로 수정 예산을
 소진하면 결과를 저장하고 다음 프로젝트로 진행한다.
 
+입력은 기본 `vanilla`이며, `--prd`로 저장소에 포함된 결함 PRD 하나를 선택할 수 있다.
+
+```bash
+./run_lmstudio.sh --prd unambiguous_defect --dry-run  # 선택·파일 존재 확인만
+./run_lmstudio.sh --prd unambiguous_defect           # 선택한 PRD로 실험
+```
+
+선택지는 `vanilla`, `unambiguous_defect`, `complete_defect`, `consistent_defect`다.
+생성 응답의 문서화된 태그 오류는 파일 반영 전에 자동 정리하고 원본·정리 내역을 보존한다.
+범위와 기존 결과 처리 방법은 [평가 안내](eval/README.md)를 참고한다.
+
 설치, 모델·샘플링·CPU/GPU 설정, `direct`/`modeling`의 차이, 대화 관리, 실행 옵션,
 결과 경로, 문제 확인 방법은 **[README_LMSTUDIO.md](README_LMSTUDIO.md)**에 정리했다.
 
@@ -61,6 +72,6 @@ benchmark/
 generate/                       # config.py (모델, interface), prompt.py, generate.py, llm.py
 eval/
   evaluate.py
-  README.md                     # 채점 전 정리 (태그 정리 규칙)
+  README.md                     # 자동 태그 정리, 기존 수동 절차, 결과 무결성
 output/<model>/<outdir>/        # 생성 결과, gen.config, result.json (git 제외)
 ```

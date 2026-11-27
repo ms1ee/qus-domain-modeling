@@ -16,7 +16,8 @@ PRD를 읽어 Python 코드를 만들고, 저장소의 단위 테스트로 검�
 모델에 전달해 수정한다. 모델이 직접 셸 도구를 선택해 작업하는 에이전트 방식과는 다르다.
 파일 반영과 테스트 실행은 이 저장소의 실행기가 담당한다.
 
-- 기본 입력은 `benchmark/<번호>/vanilla_PRD.md`이며 결함을 주입하지 않는다.
+- 기본 입력은 `benchmark/<번호>/vanilla_PRD.md`다. `--prd`로 이미 준비된 결함 PRD를 선택할 수 있다.
+  실행 중 PRD에 새 결함을 생성하거나 주입하는 기능은 아니다.
 - 기본 실행은 두 모델 × 세 프로젝트 × `direct` × 1회 = **6개 독립 실험**이다.
 - 각 실험은 **최초 생성 1회 + 최대 수정 30회**이며, 채점 대상이 모두 통과하면 바로 끝난다.
 - 이 점수는 저장소의 단위 테스트 채점 결과다. PRDBench 전체 공식 점수,
@@ -185,7 +186,7 @@ direct:   PRD + 인터페이스 ────────────────
 modeling: PRD → 도메인 모델 1회 생성·고정
                 PRD + 인터페이스 + 도메인 모델 → 코드 생성
 
-코드 생성 → 파일 반영 → 단위 테스트
+코드 생성 → 문서화된 태그 정리·경로 검증 → 파일 반영 → 단위 테스트
                          ├─ 모두 통과 → 종료
                          └─ 미통과 → 최신 상태로 입력 재구성 → 코드 수정 → 다시 검증
                                       최대 30회 수정 후 미통과해도 종료
@@ -205,6 +206,13 @@ PRD·도메인 모델·코드를 자르지 않고 `context_limit`으로 중단�
 잘린 응답, 동일 코드 응답도 수정 예산을 소비한다. 형식 오류는 코드를 적용하지 않으며,
 현재 코드 해시와 일치하는 이전 검증이 있으면 그 결과를 유지한다. 최고 점수 코드로
 자동 복구하지 않고 최신 코드에서 다음 수정을 계속한다.
+
+완결된 응답에는 **두 모델에 동일한 자동 태그 정리**를 적용한다. Python 문자열 밖의
+독립된 `</parameter>`·`</invoke>` 줄을 제거하고, 닫히지 않은 파일 블록이 동일 경로로
+재출력된 경우 마지막 완결 내용을 사용한다. 다른 형식·경로 오류는 기존대로 거부한다.
+프로그램 로직을 대신 고치지 않으며, 추가 LLM 호출이나 수정 예산 변경은 없다.
+원본 응답, 정리한 응답, 실제 적용 여부를 회차별로 남긴다. 자세한 범위는
+[태그 정리 규칙](eval/README.md)에 설명했다.
 
 LM Studio가 생성 출력을 파싱하지 못한 경우에는 `protocol_error`로 기록하고,
 도구 호출 없이 최종 답변에 파일 블록을 반환하도록 다음 요청에 피드백한다.
@@ -227,6 +235,7 @@ OS 파일 캐시를 재시작하는 것은 아니다. `both`의 두 방식과 `-
 | `--models MODEL ...` | `Qwen3-Coder-30B gpt-oss-20b` | 선택한 모델만 지정 순서대로 실행 |
 | `--projects ID ...` | `37 44 29` | 선택한 프로젝트만 지정 순서대로 실행. 중복 지정 불가 |
 | `--pipeline direct\|modeling\|both` | `direct` | 도메인 모델 없이 / 경유 / 두 방식 모두 |
+| `--prd NAME` | `vanilla` | `vanilla`, `unambiguous_defect`, `complete_defect`, `consistent_defect` 중 하나 |
 | `--iters N` | `1` | 모델·프로젝트·방식별 독립 실험 횟수. 1 이상 |
 | `--max-repairs N` | `30` | 최초 생성 이후 수정 요청 횟수. 0~30 |
 | `--run-name NAME` | 자동 생성 | 새 결과 폴더 이름. 같은 이름의 결과가 있으면 중단 |
@@ -242,11 +251,22 @@ OS 파일 캐시를 재시작하는 것은 아니다. `both`의 두 방식과 `-
 ./run_lmstudio.sh --pipeline both --iters 3               # 36개 독립 실험
 ./run_lmstudio.sh --run-name baseline-01                  # 사용하지 않은 이름
 ./run_lmstudio.sh --models gpt-oss-20b --projects 44 29    # gpt-oss 44부터 새로 실행, 29로 진행
+./run_lmstudio.sh --prd unambiguous_defect --pipeline both --dry-run # 실행 계획 확인
+./run_lmstudio.sh --prd unambiguous_defect --pipeline both # 두 모델 × 세 프로젝트 × 두 방식
+./run_lmstudio.sh --prd complete_defect --run-name complete-01
+./run_lmstudio.sh --prd consistent_defect --run-name consistent-01
 ```
 
 30회는 시간 제한이 아니다. 프로젝트별 실행 시간 상한이나 `--unlimited` 옵션은 없다.
 모델·프로젝트 선택 옵션을 생략하면 기존처럼 두 모델을 각각 37·44·29 순서로 실행한다.
 선택 실행도 새 결과 폴더에서 최초 생성부터 시작하며, 이전 회차를 이어받는 기능은 아니다.
+
+한 배치에는 PRD 유형 하나를 선택하며, 선택한 모든 프로젝트에 같은 유형을 적용한다.
+`--dry-run`도 선택한 PRD 파일의 존재를 확인한다. 누락되면 모델 로드·결과 폴더 생성 전에
+중단하며 `vanilla`로 대체하지 않는다. 유형별 비교는 새 배치로 각각 실행한다.
+모델에는 선택된 PRD를 전달하고, 결함 위치·대상 지표를 적은 `*_defect_log.json`은 전달하지 않는다.
+단위 테스트와 인터페이스는 유형에 따라 바꾸지 않는다. 결함 정의는
+[DEFECTS.md](benchmark/DEFECTS.md)를 참고한다.
 
 ### 단일 모델·프로젝트만 수동 실행하기
 
@@ -274,7 +294,7 @@ output/
 ├─ batches/<실행 이름>/
 │  ├─ run.log                         전체 진행 로그
 │  ├─ status.json                     현재 배치 단계·완료 작업·오류
-│  ├─ manifest.json                   시작 조건·프로필·커밋·재로드 정책
+│  ├─ manifest.json                   PRD 선택·프로필·커밋·재로드·태그 정리 정책
 │  ├─ qwen-37-runtime.json            프로젝트별 실제 모델 로드 설정
 │  ├─ logs/                           생성·평가 명령별 로그
 │  └─ summary.csv / summary.json      모델별 집계를 합친 결과
@@ -295,6 +315,8 @@ output/
 | 파일 | 용도 |
 |---|---|
 | `prompt.txt` / `response.txt` | 모델에 실제 보낸 입력 / 받은 코드 응답 |
+| `cleaned_response.txt` | 자동 정리로 달라진 응답만 저장. 원본은 유지 |
+| `tag_cleanup.json` / `tag_cleanup.txt` | 파일별 정리 내역·원본 줄 번호·전후 해시·실제 반영 여부 |
 | `src/` | 해당 회차 코드 스냅샷 |
 | `usage.json` | 토큰 수, 요청 설정, HTTP 시도·재시도 횟수, 종료 이유 |
 | `context.json` | 입력 토큰 예산과 줄인 이력·오류 발췌 정보 |
@@ -303,6 +325,8 @@ output/
 | 명령별 하위 폴더 | 실제 검증 시 `stdout.log`, `stderr.log`, `junit.xml`, `case.json` |
 
 `modeling` 방식에는 루트에 `modeling-prompt.txt`, `modeling.txt`, `modeling-usage.json` 등이 추가된다.
+결함 PRD를 선택하면 예시의 `37-vanilla-direct-iter-0`에서 `vanilla`가 선택한 이름으로 바뀐다.
+`manifest.json`, 개별 `run.json`의 `identity.prd`, 집계의 `prd`에도 선택값을 기록한다.
 `modeling.json`은 응답에서 JSON을 파싱할 수 있을 때 저장한다. 중단된 회차는 완료한 단계의
 파일만 존재할 수 있다. 유효한 검증이 없으면 `result.json`도 없고 점수는 `null`이다.
 
@@ -373,3 +397,29 @@ Git에는 실행기·테스트·모델 프로필·문서를 공유한다. `outpu
 별도 SDK 설치 폴더, Python/pytest 캐시, 배치 잠금, `.superpowers/`의 로컬 백업·진단 기록은
 제외한다. 결과가 필요하면 Git push와 별개로 `output/`의 해당 실행 폴더를 보관한다.
 `docs/superpowers/`는 과거 설계·구현 기록이며, 현재 실행 방법은 이 문서와 실제 코드가 기준이다.
+
+## 10. 2026-11-27 PRDBench 업데이트와 이전 결과
+
+`origin/prdbench`의 `df23b1c`까지 반영했다. 29번 테스트 3개의 시나리오 수정,
+37·44·29번 인터페이스 설명 축소, 프로젝트별 결함 PRD 3종과 주입 로그,
+인터페이스 근거 목록을 포함한다. 테스트 변경은 [PROVENANCE](benchmark/PROVENANCE.md),
+남겨 둔 인터페이스는 [interface_contracts.csv](benchmark/interface_contracts.csv)에서 확인한다.
+Claude Sonnet 등록과 Claude 전용 프롬프트 캐시도 반영했으며 LM Studio 요청에 캐시 필드를 보내지 않는다.
+
+Qwen·gpt-oss 샘플링·자원 설정, 프로젝트별 재로드, 최신 상태 기반 입력, 최대 30회 수정은 유지한다.
+새 태그 정리 정책과 업데이트된 테스트·인터페이스 때문에 **이전 실행과 새 실행은 실험 조건이 다르다**.
+같은 조건으로 비교하려면 두 모델 모두 새 버전에서 실행하고 커밋과 정책을 함께 기록한다.
+
+현재 서버의 업데이트 이전 벤치마크·실행기와 결과 파일 해시 목록은 다음 위치에 보관했다.
+
+```text
+output/archives/pre_prdbench_sync_20261127-180026/
+  benchmark/         당시 벤치마크
+  runner/            당시 실행기
+  manifest.json      기존 결과 파일의 해시와 당시 커밋
+```
+
+기존 결과 폴더는 그대로 유지한다. 새 벤치마크로 이전 `run.json`을 재집계하면
+입력 해시가 달라 무결성 오류가 날 수 있다. 이전 결과는 저장된 `summary`·`result.json`을
+읽거나, 별도 작업 폴더에 당시 실행기·벤치마크·결과 복사본을 함께 구성해 검증한다.
+새 버전에 맞추려고 원본 결과의 해시를 고치거나 `result.json`을 삭제하지 않는다.

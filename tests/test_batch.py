@@ -92,6 +92,71 @@ CODE = '<file path="src/calculator.py">\ndef add(a,b):\n    return a+b\n</file>'
 DOMAIN = '{"classes": [{"name": "Calculator", "attributes": []}], "associations": []}'
 
 
+@pytest.mark.parametrize('prd', ['unambiguous_defect', 'complete_defect', 'consistent_defect'])
+def test_selected_prd_reaches_both_models_and_pipelines_with_matching_identity(batch_repo, endpoint, prd):
+    repo, env = batch_repo
+    selected = f'Selected requirements: {prd}.'
+    (repo / 'benchmark/44' / f'{prd}_PRD.md').write_text(selected)
+    (repo / 'benchmark/44' / f'{prd}_log.json').write_text('{"oracle": "DO_NOT_SEND_DEFECT_ANNOTATIONS"}')
+    replies = [(200, completion(text)) for _ in range(2) for text in (CODE, DOMAIN, CODE)]
+    with endpoint(replies) as (url, requests):
+        env['LMSTUDIO_API_BASE'] = url
+        result = execute(repo, env, '--projects', '44', '--pipeline', 'both', '--prd', prd)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(requests) == 6
+    for request in requests:
+        prompt = request['messages'][0]['content']
+        assert selected in prompt
+        assert 'Return the sum of two integers.' not in prompt
+        assert 'DO_NOT_SEND_DEFECT_ANNOTATIONS' not in prompt
+        assert 'cache_control' not in json.dumps(request)
+    batch = repo / 'output/batches/fixture'
+    manifest = json.loads((batch / 'manifest.json').read_text())
+    assert manifest['prd'] == prd and manifest['tag_cleanup_policy'] == 'documented-tags-v1'
+    summary = json.loads((batch / 'summary.json').read_text())
+    assert len(summary) == 4 and all(row['prd'] == prd for row in summary)
+    for model in ('Qwen3-Coder-30B', 'gpt-oss-20b'):
+        for pipeline in ('direct', 'modeling'):
+            trial = repo / 'output' / model / 'fixture' / f'44-{prd}-{pipeline}-iter-0'
+            state = json.loads((trial / 'run.json').read_text())
+            assert state['identity']['prd'] == prd and state['status'] == 'passed'
+            assert json.loads((trial / 'inputs.json').read_text())['prd'] == selected
+
+
+@pytest.mark.parametrize('prd', ['vanilla', 'complete_defect'])
+@pytest.mark.parametrize('dry_run', [False, True])
+def test_missing_prd_in_last_project_fails_before_any_model_or_batch(batch_repo, prd, dry_run):
+    repo, env = batch_repo
+    if prd == 'vanilla':
+        (repo / 'benchmark/29/vanilla_PRD.md').unlink()
+    else:
+        for task in ('37', '44'):
+            (repo / 'benchmark' / task / f'{prd}_PRD.md').write_text('selected variant')
+    args = ('--dry-run',) if dry_run else ()
+    result = execute(repo, env, '--prd', prd, *args)
+    assert result.returncode != 0 and f'29/{prd}_PRD.md' in result.stderr
+    assert not (repo / 'output').exists()
+    assert not (repo / '.lmstudio-batch.lock').exists()
+    assert not Path(env['FIXTURE_EVENTS']).exists()
+
+
+@pytest.mark.parametrize('prd', ['unknown', '../vanilla'])
+def test_unknown_prd_is_rejected_before_model_work(batch_repo, prd):
+    repo, env = batch_repo
+    result = execute(repo, env, '--prd', prd)
+    assert result.returncode != 0 and 'invalid choice' in result.stderr
+    assert not (repo / 'output').exists() and not Path(env['FIXTURE_EVENTS']).exists()
+
+
+def test_selected_prd_dry_run_has_no_model_or_filesystem_side_effects(batch_repo):
+    repo, env = batch_repo
+    (repo / 'benchmark/44/consistent_defect_PRD.md').write_text('selected variant')
+    result = execute(repo, env, '--projects', '44', '--prd', 'consistent_defect', '--dry-run')
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['prd'] == 'consistent_defect'
+    assert not (repo / 'output').exists() and not Path(env['FIXTURE_EVENTS']).exists()
+
+
 def test_selected_gptoss_batch_runs_only_44_then_29(batch_repo, endpoint):
     repo, env = batch_repo
     with endpoint([(200, completion(CODE))]) as (url, requests):
@@ -248,6 +313,7 @@ def test_dry_run_has_no_model_or_filesystem_side_effects(batch_repo):
     assert plan['pipelines'] == ['modeling'] and plan['projects'] == ['37', '44', '29']
     assert plan['models'] == ['Qwen3-Coder-30B', 'gpt-oss-20b']
     assert plan['max_repairs'] == 30
+    assert plan['prd'] == 'vanilla'
     assert not (repo / 'output').exists()
     assert not Path(env['FIXTURE_EVENTS']).exists()
     assert not Path(env['PRDBENCH_EXPERIMENT_LOCK']).exists()

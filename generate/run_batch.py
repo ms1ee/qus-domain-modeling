@@ -20,10 +20,12 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from config import MODELS, ROOT_DIR
 from lmstudio_runtime import Runtime, connection, load_profile
+from tag_cleanup import POLICY as TAG_CLEANUP_POLICY
 
 ROOT = Path(ROOT_DIR)
 LOCAL_MODELS = ['Qwen3-Coder-30B', 'gpt-oss-20b']
 PROJECTS = ['37', '44', '29']
+PRD_VARIANTS = ['vanilla', 'unambiguous_defect', 'complete_defect', 'consistent_defect']
 
 
 def timestamp():
@@ -143,7 +145,18 @@ def summarize_saved_trials(plan, batch):
     combine_summaries(plan, batch)
 
 
+def validate_prd_inputs(plan):
+    if plan['prd'] not in PRD_VARIANTS:
+        raise ValueError(f'Unknown PRD variant: {plan["prd"]}')
+    missing = [ROOT / 'benchmark' / task / f'{plan["prd"]}_PRD.md'
+               for task in plan['projects']
+               if not (ROOT / 'benchmark' / task / f'{plan["prd"]}_PRD.md').is_file()]
+    if missing:
+        raise FileNotFoundError('Selected PRD files not found: ' + ', '.join(str(path) for path in missing))
+
+
 def execute(plan):
+    validate_prd_inputs(plan)
     batch = ROOT / 'output/batches' / plan['run_name']
     destinations = [batch] + [ROOT / 'output' / model / plan['run_name'] for model in plan['models']]
     for path in destinations:
@@ -157,6 +170,7 @@ def execute(plan):
         dirty = subprocess.run(['git', 'status', '--porcelain'], cwd=ROOT, capture_output=True, text=True)
         save_json(batch / 'manifest.json', {**plan, 'started_at': timestamp(),
                   'model_reload_policy': 'per_project',
+                  'tag_cleanup_policy': TAG_CLEANUP_POLICY,
                   'python': sys.executable, 'commit': commit.stdout.strip() if commit.returncode == 0 else None,
                   'working_tree_dirty': bool(dirty.stdout) if dirty.returncode == 0 else None,
                   'profiles': profiles})
@@ -198,7 +212,7 @@ def execute(plan):
                                 label = f'{alias}-{task}-{pipeline}'
                                 stage(f'GENERATE {model}/{task}/{pipeline}')
                                 command = [sys.executable, '-u', str(ROOT / 'generate/generate.py'),
-                                           model, task, 'vanilla', str(plan['iters']), plan['run_name'],
+                                           model, task, plan['prd'], str(plan['iters']), plan['run_name'],
                                            '--max-repairs', str(plan.get('max_repairs', 30))]
                                 if pipeline == 'modeling':
                                     command.append('--modeling')
@@ -247,6 +261,8 @@ def main(argv=None):
     parser.add_argument('--projects', nargs='+', choices=PROJECTS, default=PROJECTS,
                         help='Projects to run in the supplied order (default: 37 44 29)')
     parser.add_argument('--pipeline', choices=['direct', 'modeling', 'both'], default='direct')
+    parser.add_argument('--prd', choices=PRD_VARIANTS, default='vanilla',
+                        help='PRD variant for every selected project (default: vanilla)')
     parser.add_argument('--iters', type=int, default=1, help='Iterations per project/pipeline (default: 1)')
     parser.add_argument('--max-repairs', type=int, default=30,
                         help='Repair requests after initial generation per trial (default: 30; 0 allowed)')
@@ -265,8 +281,12 @@ def main(argv=None):
         parser.error('--run-name must be a simple directory name (letters, numbers, _, -, .)')
     plan = {'run_name': name, 'models': args.models, 'projects': args.projects,
             'pipelines': ['direct', 'modeling'] if args.pipeline == 'both' else [args.pipeline],
-            'iters': args.iters, 'prd': 'vanilla', 'max_repairs': args.max_repairs}
+            'iters': args.iters, 'prd': args.prd, 'max_repairs': args.max_repairs}
     if args.dry_run:
+        try:
+            validate_prd_inputs(plan)
+        except (ValueError, FileNotFoundError) as error:
+            parser.error(str(error))
         print(json.dumps(plan, indent=2))
         return 0
     load_dotenv(ROOT / '.env')
