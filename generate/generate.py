@@ -10,7 +10,7 @@ from artifacts import snapshot_hashes, write_json, ArtifactIntegrityError, sourc
 from session import create_state
 from repair import run_trial, response_complete, finish_trial, evaluation
 from context import ContextBudgetError
-from experiment import DEFAULT_SEED_BASE, iteration_seed, seed_schedule, validate_feedback_level
+from experiment import DEFAULT_FEEDBACK_LEVEL, DEFAULT_SEED_BASE, iteration_seed, seed_schedule, validate_feedback_level
 
 load_dotenv(os.path.join(ROOT_DIR, ".env"))
 
@@ -47,7 +47,7 @@ def extract_files(response):
 
 
 def run_once(llm, task, prd, use_modeling, run_dir, *, max_repairs=30, prd_name='vanilla', nth=0,
-             feedback_level=3, seed=None):
+             feedback_level=DEFAULT_FEEDBACK_LEVEL, seed=None):
     validate_feedback_level(feedback_level)
     if not 0 <= max_repairs <= 30:
         raise ValueError('max_repairs must be between 0 and 30')
@@ -135,7 +135,7 @@ def log_gen_info(outdir, args, llm):
                 % (args.task, args.prd, "modeling" if args.modeling else "direct", args.iters))
         f.write("Start Time: %d\n" % int(time.time()))
         f.write("Max repairs after initial generation: %d\n" % getattr(args, 'max_repairs', 30))
-        f.write("Feedback level: %d\n" % getattr(args, 'feedback_level', 3))
+        f.write("Feedback level: %d\n" % getattr(args, 'feedback_level', DEFAULT_FEEDBACK_LEVEL))
         if isinstance(llm, LMStudio):
             base = getattr(args, 'seed_base', None)
             f.write("Seed schedule by independent iteration: %s\n" %
@@ -152,8 +152,8 @@ def main():
     parser.add_argument("outdir", help="output/<model>/<outdir>")
     parser.add_argument("--modeling", action="store_true", help="PRD -> Modeling -> Code")
     parser.add_argument('--max-repairs', type=int, default=30, help='Repair requests after initial generation (default: 30)')
-    parser.add_argument('--feedback-level', type=int, choices=(1, 2, 3), default=3,
-                        help='1: score; 2: score and item outcomes; 3: detailed failures and history (default)')
+    parser.add_argument('--feedback-level', type=int, choices=(1, 2, 3), default=DEFAULT_FEEDBACK_LEVEL,
+                        help='1: score (default); 2: score and item outcomes; 3: detailed failures and history')
     parser.add_argument('--seed-base', type=int,
                         help='LM Studio only: repetition i uses base+i (default: 42)')
     args = parser.parse_args()

@@ -82,9 +82,11 @@ export class LMStudioClient {
     return repo, env
 
 
-def execute(repo, env, *args):
+def execute(repo, env, *args, cli_defaults=False):
     assert (repo / 'run_lmstudio.sh').is_file(), 'batch entry point is missing'
-    return subprocess.run(['bash', str(repo / 'run_lmstudio.sh'), '--run-name', 'fixture', *args],
+    # Keep unrelated integration fixtures small; default-plan checks opt out.
+    selection = [] if cli_defaults else ['--pipeline', 'direct', '--iters', '1']
+    return subprocess.run(['bash', str(repo / 'run_lmstudio.sh'), '--run-name', 'fixture', *selection, *args],
                           cwd=repo.parent, env=env, capture_output=True, text=True, timeout=90)
 
 

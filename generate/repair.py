@@ -14,7 +14,7 @@ from artifacts import (ArtifactIntegrityError, ResponseFormatError, parse_change
 from context import ContextBudgetError, build_prompt, fit_prompt
 from session import create_state, now, record_round
 from tag_cleanup import normalize_response, cleanup_report
-from experiment import validate_feedback_level
+from experiment import DEFAULT_FEEDBACK_LEVEL, validate_feedback_level
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'eval'))
 import evaluate as evaluation
@@ -80,7 +80,7 @@ def run_trial(llm, *, identity: dict, fixed: dict, run_dir: Path, max_repairs: i
               state: dict | None = None) -> dict:
     if not 0 <= max_repairs <= 30:
         raise ValueError('max_repairs must be between 0 and 30')
-    feedback_level = validate_feedback_level(identity.get('feedback_level', 3))
+    feedback_level = validate_feedback_level(identity.get('feedback_level', DEFAULT_FEEDBACK_LEVEL))
     run_dir = Path(run_dir)
     benchmark = Path(evaluation.BENCHMARK_DIR) / identity['task']
     state = state if state is not None else create_state(

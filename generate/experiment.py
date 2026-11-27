@@ -1,6 +1,7 @@
 """Shared validation of experiment conditions before any model work."""
 
 DEFAULT_SEED_BASE = 42
+DEFAULT_FEEDBACK_LEVEL = 1
 # llama.cpp reserves UINT32_MAX for a fresh random seed, not a fixed seed.
 MAX_SEED = 2**32 - 2
 

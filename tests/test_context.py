@@ -21,7 +21,8 @@ def test_prompt_contains_latest_state_without_old_source_or_reasoning():
     module = context_module()
     prompt = module.build_prompt(FIXED, FILES, VALIDATION, [
         {'round': 0, 'passed': 0, 'total': 1, 'changed_paths': ['src/main.py'],
-         'failed_items': {'1.1': 'fail'}, 'raw_response': 'OLD_SOURCE', 'reasoning_content': 'PRIVATE_REASONING'}])
+         'failed_items': {'1.1': 'fail'}, 'raw_response': 'OLD_SOURCE', 'reasoning_content': 'PRIVATE_REASONING'}],
+        feedback_level=3)
     for text in ('ORIGINAL_PRD', 'ORIGINAL_INTERFACE', 'FROZEN_DOMAIN', 'CURRENT_CODE', 'expected 5 but got 3', '1.1'):
         assert text in prompt
     assert 'OLD_SOURCE' not in prompt and 'PRIVATE_REASONING' not in prompt
@@ -52,7 +53,7 @@ def test_history_then_error_excerpt_shrinks_but_all_failure_ids_remain():
         calls.append(prompt)
         fits = 'OLD-HISTORY' not in prompt and 'RECENT-HISTORY' not in prompt and len(prompt) < 4000
         return {'tokens': 100 if fits else 100000, 'runtime': {'context_length': 32768}}
-    result = module.fit_prompt(FIXED, FILES, validation, history, preflight=preflight)
+    result = module.fit_prompt(FIXED, FILES, validation, history, preflight=preflight, feedback_level=3)
     assert 'OLD-HISTORY' in calls[0] and 'OLD-HISTORY' not in calls[1]
     assert 'RECENT-HISTORY' in calls[1] and 'RECENT-HISTORY' not in calls[2]
     assert result['omissions'] and len(calls) >= 4

@@ -50,7 +50,7 @@ def test_seed_is_stable_across_modeling_repairs_retries_and_old_usage_snapshots(
     assert usage_before['settings']['feedback_level'] == 2
     assert first['modeling_usage']['settings']['feedback_level'] == 2
     assert first['rounds'][1]['usage']['settings']['feedback_level'] == 2
-    assert second['rounds'][0]['usage']['settings']['feedback_level'] == 3
+    assert second['rounds'][0]['usage']['settings']['feedback_level'] == 1
     assert model.profile['sampling']['seed'] == 42
     assert all(r.get('reasoning_effort') == ('medium' if name == 'gpt-oss-20b' else None) for r in requests)
 
@@ -85,12 +85,14 @@ def test_batch_pairs_seed_schedule_across_models_projects_and_pipelines(batch_re
                     assert state['settings']['sampling']['seed'] == seed
 
 
-def test_five_default_repetitions_are_distinct_and_visible_in_dry_run(batch_repo):
+def test_default_batch_uses_both_pipelines_three_seeds_and_score_feedback(batch_repo):
     repo, env = batch_repo
-    result = execute(repo, env, '--iters', '5', '--dry-run')
+    result = execute(repo, env, '--dry-run', cli_defaults=True)
     assert result.returncode == 0, result.stderr
     plan = json.loads(result.stdout)
-    assert plan['seeds'] == [42, 43, 44, 45, 46] and plan['feedback_level'] == 3
+    assert plan['seeds'] == [42, 43, 44] and plan['feedback_level'] == 1
+    assert plan['iters'] == 3 and plan['pipelines'] == ['direct', 'modeling']
+    assert len(plan['models']) * len(plan['projects']) * len(plan['pipelines']) * plan['iters'] == 36
     assert not (repo / 'output').exists() and not Path(env['FIXTURE_EVENTS']).exists()
 
 
@@ -104,7 +106,7 @@ def test_invalid_conditions_fail_before_loading_or_creating_output(batch_repo, a
     assert not (repo / 'output').exists() and not Path(env['FIXTURE_EVENTS']).exists()
 
 
-@pytest.mark.parametrize('changed_args', [('--seed-base', '43'), ('--feedback-level', '1')])
+@pytest.mark.parametrize('changed_args', [('--seed-base', '43'), ('--feedback-level', '3')])
 def test_manual_generator_cannot_skip_trial_from_different_conditions(
         changed_args, tiny_benchmark, tmp_path, endpoint, runtime_fixture, monkeypatch):
     import generate

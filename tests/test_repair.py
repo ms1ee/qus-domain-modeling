@@ -31,12 +31,12 @@ class FakeLLM:
                         'input_tokens': 100, 'output_tokens': 20, 'retries': 0}
 
 
-def execute(model, tmp_path, *, modeling=False, budget=30, name='trial'):
+def execute(model, tmp_path, *, modeling=False, budget=30, name='trial', feedback_level=3):
     assert importlib.util.find_spec('repair') is not None, 'repair controller is missing'
     import generate
     run_dir = tmp_path / name
     result = generate.run_once(model, '44', 'Return the sum of two integers.', modeling, run_dir,
-                               max_repairs=budget)
+                               max_repairs=budget, feedback_level=feedback_level)
     return run_dir, result
 
 

@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 from config import MODELS, ROOT_DIR
 from lmstudio_runtime import Runtime, connection, load_profile
 from tag_cleanup import POLICY as TAG_CLEANUP_POLICY
-from experiment import DEFAULT_SEED_BASE, seed_schedule, validate_feedback_level
+from experiment import DEFAULT_FEEDBACK_LEVEL, DEFAULT_SEED_BASE, seed_schedule, validate_feedback_level
 
 ROOT = Path(ROOT_DIR)
 LOCAL_MODELS = ['Qwen3-Coder-30B', 'gpt-oss-20b']
@@ -163,7 +163,7 @@ def validate_prd_inputs(plan):
 
 
 def execute(plan):
-    plan = {**plan, 'feedback_level': validate_feedback_level(plan.get('feedback_level', 3)),
+    plan = {**plan, 'feedback_level': validate_feedback_level(plan.get('feedback_level', DEFAULT_FEEDBACK_LEVEL)),
             'seed_base': plan.get('seed_base', DEFAULT_SEED_BASE)}
     plan['seeds'] = seed_schedule(plan['seed_base'], plan['iters'])
     validate_prd_inputs(plan)
@@ -272,14 +272,15 @@ def main(argv=None):
                         help='Models to run in the supplied order (default: both models)')
     parser.add_argument('--projects', nargs='+', choices=PROJECTS, default=PROJECTS,
                         help='Projects to run in the supplied order (default: 37 44 29)')
-    parser.add_argument('--pipeline', choices=['direct', 'modeling', 'both'], default='direct')
+    parser.add_argument('--pipeline', choices=['direct', 'modeling', 'both'], default='both',
+                        help='Generation pipelines (default: both)')
     parser.add_argument('--prd', choices=PRD_VARIANTS, default='vanilla',
                         help='PRD variant for every selected project (default: vanilla)')
-    parser.add_argument('--iters', type=int, default=1, help='Iterations per project/pipeline (default: 1)')
+    parser.add_argument('--iters', type=int, default=3, help='Iterations per project/pipeline (default: 3)')
     parser.add_argument('--max-repairs', type=int, default=30,
                         help='Repair requests after initial generation per trial (default: 30; 0 allowed)')
-    parser.add_argument('--feedback-level', type=int, choices=(1, 2, 3), default=3,
-                        help='1: score; 2: score and item outcomes; 3: detailed failures and history (default)')
+    parser.add_argument('--feedback-level', type=int, choices=(1, 2, 3), default=DEFAULT_FEEDBACK_LEVEL,
+                        help='1: score (default); 2: score and item outcomes; 3: detailed failures and history')
     parser.add_argument('--seed-base', type=int, default=DEFAULT_SEED_BASE,
                         help='Independent repetition i uses base+i for both models (default: 42)')
     parser.add_argument('--run-name', help='Fresh output directory name; generated automatically by default')

@@ -3,7 +3,7 @@ import time
 from abc import ABC, abstractmethod
 from config import *
 from context import ContextBudgetError
-from experiment import iteration_seed, validate_feedback_level
+from experiment import DEFAULT_FEEDBACK_LEVEL, iteration_seed, validate_feedback_level
 from model_output import (OUTPUT_FEEDBACK, api_error_details, capture_server_logs,
                           classify_parser_error, completion_status)
 
@@ -66,7 +66,7 @@ class LMStudio(LLM):
 
         self.profile = lmstudio_runtime.load_profile(model_id)
         self.seed = iteration_seed(self.profile['sampling']['seed'], 0)
-        self.feedback_level = 3
+        self.feedback_level = DEFAULT_FEEDBACK_LEVEL
         base_url, self.model_id = lmstudio_runtime.connection(self.profile)
         self.base_url = base_url
         self.runtime = lmstudio_runtime.Runtime(self.profile, base_url, self.model_id)

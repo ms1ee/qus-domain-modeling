@@ -2,7 +2,7 @@
 import json
 
 from prompt import STATE_CODE_RULES
-from experiment import validate_feedback_level
+from experiment import DEFAULT_FEEDBACK_LEVEL, validate_feedback_level
 
 
 class ContextBudgetError(ValueError):
@@ -58,7 +58,7 @@ def _history_view(history, mode):
 
 def build_prompt(fixed: dict, files: dict[str, str], validation: dict | None, history: list[dict], *,
                  format_error: str | None = None, history_mode='full', error_chars=6000,
-                 feedback_level=3) -> str:
+                 feedback_level=DEFAULT_FEEDBACK_LEVEL) -> str:
     validate_feedback_level(feedback_level)
     sections = [STATE_CODE_RULES,
                 f'Code request round {fixed.get("round", 0)}; repair limit {fixed.get("max_repairs", 30)}.',
@@ -81,7 +81,7 @@ def build_prompt(fixed: dict, files: dict[str, str], validation: dict | None, hi
 
 
 def fit_prompt(fixed: dict, files: dict, validation: dict | None, history: list[dict], *, preflight,
-               format_error: str | None = None, feedback_level=3) -> dict:
+               format_error: str | None = None, feedback_level=DEFAULT_FEEDBACK_LEVEL) -> dict:
     validate_feedback_level(feedback_level)
     policies = ([('full', 6000), ('recent', 6000), ('none', 6000), ('none', 1500), ('none', 400)]
                 if feedback_level == 3 else [('none', 6000)] +
