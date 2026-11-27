@@ -7,6 +7,7 @@ import shutil
 import sys
 import time
 
+from llm import request_completion
 from artifacts import (ArtifactIntegrityError, ResponseFormatError, parse_changes,
                        publish_revision, read_generated_files, snapshot_hashes,
                        source_digest, write_json)
@@ -142,7 +143,7 @@ def run_trial(llm, *, identity: dict, fixed: dict, run_dir: Path, max_repairs: i
             print(f'  [Round {number}/{max_repairs}] requesting code', flush=True)
             call_started = time.monotonic()
             try:
-                response, usage = llm.chat(prompt)
+                response, usage = request_completion(llm, prompt, cache=identity['pipeline'] == 'direct')
             finally:
                 record['llm_seconds'] = time.monotonic() - call_started
             record['usage'] = usage

@@ -5,6 +5,8 @@
 - `<id>/vanilla_PRD.md` = `PRDBench/<id>/src/PRD.md` (수정 없음)
 - `<id>/evaluation/` = `PRDBench/<id>/evaluation/` (`__pycache__` 제외). 수정 원칙: PRD를 기준으로 테스트를 고친다.
   PRD/계약에 정의된 문자열 비교는 공백 제거 + 대소문자 무시(`norm`)로 비교한다.
+- PRD에 없지만 테스트 때문에 interface(`generate/config.py`)에 남긴 줄: [`interface_contracts.csv`](interface_contracts.csv)
+  (category: `test_string` 테스트가 비교하는 문자열, `test_env` 테스트 환경 전제, `behavior` 동작 설명 / in_prd: `no`, `partial` / metrics: 그 줄에 의존하는 채점 항목)
 
 ## 37 Company Team Building Event Smart Lottery System
 
@@ -48,6 +50,8 @@ plan 밖 테스트(`test_chenru_group_guarantee_not_triggered`)도 부서명만 
 | 8.1 | tests/test_order_completion.py | `order.assign_to(rider.num)`, `order.status == "completed"` | `rider.rider_id`, `norm` 비교 | PRD 2.2, 3.2 / 계약 문자열 |
 | 6.3a, 6.3b | tests/test_rider_history.py | 이벤트 이름 정확 일치 | `norm` 비교 | 계약 문자열 |
 | 3.2a, 3.2b, 3.2c | tests/test_rider_initialization.py | `init_system()` 뒤 `riders[0]` (초기 라이더가 있다고 가정) | `init_system()` 뒤 `Rider(1)`로 새 라이더의 초기 속성 검사 | PRD 2.1 (라이더 목록은 빈 리스트로 시작, 신규 라이더 초기 속성) |
+| 4.2, 6.3a, 6.3b, 8.1 | tests/test_rider_state_transition.py, test_rider_history.py, test_order_completion.py | 식당/고객 `(100, 100)`/`(200, 200)`, `rider.x, rider.y`를 직접 바꾼 뒤 `move()` 한 번에 도착 처리 | 칸 중심 `(150, 150)`/`(250, 250)`, 상태가 바뀔 때까지 `move()` 반복 (최대 500 tick) | PRD 2.3, 3.4 (입력 좌표를 칸 중심으로 변환). 위치 직접 변경 후 도착 처리는 PRD에 없음 |
+| 8.1 | tests/test_order_completion.py | `gl._init()`만 호출, 등록 안 된 라이더에 `assign_to`, `state = 2` 직접 설정 | `init_system()` 뒤 라이더를 `riders`에 등록, `assign_to`가 이미 추가했으면 다시 추가 안 함 | PRD 2.1, 2.2 |
 
 PRD로 정해지지 않는 동작 (PRD 한계, 수정 안 함):
 - 5.2 Rider Movement: (0, 0)에서 (100, 100)으로 갈 때 y축을 먼저 움직이고, 주문을 받은 tick에도 이동한다고 가정한다 (두 번 `move()` 후 y == 20).

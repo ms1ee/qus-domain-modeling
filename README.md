@@ -46,3 +46,21 @@ python eval/evaluate.py Claude-Haiku-5.5 vanilla10-1124
 
 설치, 모델·샘플링·CPU/GPU 설정, `direct`/`modeling`의 차이, 대화 관리, 실행 옵션,
 결과 경로, 문제 확인 방법은 **[README_LMSTUDIO.md](README_LMSTUDIO.md)**에 정리했다.
+
+## Structure
+
+```
+benchmark/
+  PROVENANCE.md                 # PRDBench 출처, 테스트 수정 내역, 채점 제외 항목
+  DEFECTS.md                    # 결함 정의와 주입 규칙
+  interface_contracts.csv       # PRD에 없지만 테스트 때문에 interface에 남긴 줄
+  <task>/vanilla_PRD.md
+  <task>/<type>_defect_PRD.md   # 결함 PRD
+  <task>/<type>_defect_log.json # 결함 위치와 대상 metric
+  <task>/evaluation/            # 채점 테스트
+generate/                       # config.py (모델, interface), prompt.py, generate.py, llm.py
+eval/
+  evaluate.py
+  README.md                     # 채점 전 정리 (태그 정리 규칙)
+output/<model>/<outdir>/        # 생성 결과, gen.config, result.json (git 제외)
+```

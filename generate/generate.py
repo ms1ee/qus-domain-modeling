@@ -5,7 +5,7 @@ import signal
 from dotenv import load_dotenv
 from config import *
 from prompt import *
-from llm import make_llm
+from llm import make_llm, request_completion
 from artifacts import snapshot_hashes, write_json, ArtifactIntegrityError, source_digest
 from session import create_state
 from repair import run_trial, response_complete, finish_trial, evaluation
@@ -73,7 +73,7 @@ def run_once(llm, task, prd, use_modeling, run_dir, *, max_repairs=30, prd_name=
             print('  [*] Modeling (once; frozen for all repairs)', flush=True)
             started = time.monotonic()
             try:
-                modeling, usage = llm.chat(modeling_prompt)
+                modeling, usage = request_completion(llm, modeling_prompt)
             except BaseException as error:
                 if getattr(error, 'request_usage', None) is not None:
                     state['modeling_usage'] = error.request_usage

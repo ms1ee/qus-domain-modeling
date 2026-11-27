@@ -7,12 +7,14 @@ OUTDIR_BASE = os.path.join(ROOT_DIR, "output")
 ## Models: name -> (provider, model id)
 MODELS = {
     "Claude-Opus-5.5": ("anthropic", "claude-opus-5-5"),
+    "Claude-Sonnet-5.5": ("anthropic", "claude-sonnet-5-5"),
     "Claude-Haiku-5.5": ("anthropic", "claude-haiku-5-5"),
     "Qwen3-Coder-30B": ("lmstudio", "qwen/qwen3-coder-30b"),
     "gpt-oss-20b": ("lmstudio", "openai/gpt-oss-20b"),
 }
 
-## Claude Opus/Haiku 5.5: no temperature (400), adaptive thinking, effort default medium
+## Claude 5.5: no temperature (400), adaptive thinking. Effort fixed to medium for all models
+## (Sonnet 5.5 default is high)
 EFFORT = "medium"
 MAX_TOKENS = 128000
 
@@ -41,7 +43,7 @@ lottery_system.services.prize_manager.PrizeManager()        # starts with no pri
 
 lottery_system.services.lottery_manager.LotteryManager(users)
   _get_eligible_pool(prize) -> list[User]
-  last_two_draw_results: list[bool]                         # per draw: whether a Cheng Ru group member won
+  last_two_draw_results: list[bool]
 
 lottery_system.services.result_manager
   Winner                                                    # attr: user
@@ -65,7 +67,7 @@ models
   Edge(source, dest, distance, line)              # source/dest: station numbers; attrs: weight (= distance), line
   Graph()                                         # station numbers are assigned by the caller, not by Graph
     set_station_lines(station_name, lines)
-    add_edge(edge)                                # accepts any station numbers used by the edges
+    add_edge(edge)
     station_lines: dict[station name, list[str]]
 pathfinding
   PathfindingConfig()                             # attrs: mode, max_transfers, preferred_lines (list[str])
@@ -74,29 +76,29 @@ pathfinding
     path_with_edges(target) -> (list[station number], list[Edge])
     get_transfer_count(target) -> int
 fare_calculator
-  Sum_money(distance) -> int                      # distance in meters, fare in yuan
-  calculate_estimated_time(distance, transfer_count) -> float   # distance in meters, time in minutes
+  Sum_money(distance) -> int                      # distance in meters
+  calculate_estimated_time(distance, transfer_count) -> float   # distance in meters
 """,
     },
     "29": {
         "name": "Food Delivery Order Dispatch System",
         "interface": """Top-level modules under src/:
 globalvar
-  _init()                                         # reset the global store
+  _init()
   set_value(key, value), get_value(key)           # key "riders": list[Rider]
 system
-  init_system()                                   # system startup: reset global state
+  init_system()
 rider
-  Rider(rider_id)                                 # attrs: rider_id, x, y, speed, state, orders (list[Order]), log (list[dict])
+  Rider(rider_id)
     An order is assigned to a rider by appending it to rider.orders.
     move()                                        # advance one tick; state transitions and their log entries happen here
-    log entries: dict with keys "event" and "order_id"
+    rider.log: list of dict entries with keys "event" and "order_id"
       events: "spawn", "accepted_order", "arrived_at_merchant", "delivered_to_customer"
 order_model
-  Order(res_pos, cus_pos)                         # (x, y) tuples stored as given; attrs: id, status ("completed" after delivery)
+  Order(res_pos, cus_pos)                         # attrs: id, status ("completed" after delivery)
     assign_to(rider_id)
 order
-  find_best_rider_for_order(order) -> Rider       # among the riders in globalvar "riders"
+  find_best_rider_for_order(order) -> Rider
 """,
     },
 }
