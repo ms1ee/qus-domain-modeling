@@ -41,7 +41,7 @@ lottery_system.services.prize_manager.PrizeManager()        # starts with no pri
 
 lottery_system.services.lottery_manager.LotteryManager(users)
   _get_eligible_pool(prize) -> list[User]
-  last_two_draw_results: list[bool]                         # per draw: whether a Cheng Ru group member won
+  last_two_draw_results: list[bool]
 
 lottery_system.services.result_manager
   Winner                                                    # attr: user
@@ -74,29 +74,29 @@ pathfinding
     path_with_edges(target) -> (list[station number], list[Edge])
     get_transfer_count(target) -> int
 fare_calculator
-  Sum_money(distance) -> int                      # distance in meters, fare in yuan
-  calculate_estimated_time(distance, transfer_count) -> float   # distance in meters, time in minutes
+  Sum_money(distance) -> int                      # distance in meters
+  calculate_estimated_time(distance, transfer_count) -> float   # distance in meters
 """,
     },
     "29": {
         "name": "Food Delivery Order Dispatch System",
         "interface": """Top-level modules under src/:
 globalvar
-  _init()                                         # reset the global store
+  _init()
   set_value(key, value), get_value(key)           # key "riders": list[Rider]
 system
-  init_system()                                   # system startup: reset global state
+  init_system()
 rider
-  Rider(rider_id)                                 # attrs: rider_id, x, y, speed, state, orders (list[Order]), log (list[dict])
+  Rider(rider_id)
     An order is assigned to a rider by appending it to rider.orders.
     move()                                        # advance one tick; state transitions and their log entries happen here
-    log entries: dict with keys "event" and "order_id"
+    rider.log: list of dict entries with keys "event" and "order_id"
       events: "spawn", "accepted_order", "arrived_at_merchant", "delivered_to_customer"
 order_model
-  Order(res_pos, cus_pos)                         # (x, y) tuples stored as given; attrs: id, status ("completed" after delivery)
+  Order(res_pos, cus_pos)                         # attrs: id, status ("completed" after delivery)
     assign_to(rider_id)
 order
-  find_best_rider_for_order(order) -> Rider       # among the riders in globalvar "riders"
+  find_best_rider_for_order(order) -> Rider
 """,
     },
 }
