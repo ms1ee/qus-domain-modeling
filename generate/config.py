@@ -7,10 +7,12 @@ OUTDIR_BASE = os.path.join(ROOT_DIR, "output")
 ## Models: name -> (provider, model id)
 MODELS = {
     "Claude-Opus-5.5": ("anthropic", "claude-opus-5-5"),
+    "Claude-Sonnet-5.5": ("anthropic", "claude-sonnet-5-5"),
     "Claude-Haiku-5.5": ("anthropic", "claude-haiku-5-5"),
 }
 
-## Claude Opus/Haiku 5.5: no temperature (400), adaptive thinking, effort default medium
+## Claude 5.5: no temperature (400), adaptive thinking. Effort fixed to medium for all models
+## (Sonnet 5.5 default is high)
 EFFORT = "medium"
 MAX_TOKENS = 128000
 
