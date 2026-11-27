@@ -57,6 +57,8 @@ Return source code in your final answer using the file blocks below; reasoning o
 Follow module paths, class/function names, signatures, and return values exactly. Implement all functional requirements.
 The supplied tests, requirements, domain model and provided data are immutable. Do not write or weaken tests.
 The CurrentCode section is the complete CURRENT generated source, not a suggestion or an old conversation.
+RepairHistory records prior attempts in this trial. Use their changed files, scores and repeated revisions to avoid resubmitting unchanged failing code.
+repeat_of_round identifies an earlier identical applied source; validation_round identifies the evaluation behind the score. Rejected or unchanged responses may retain an earlier score without a new test run. Null scores mean unmeasured.
 Use the observed validation failures to diagnose the cause and repair the implementation. Do not claim success without executable code.
 On the initial request, produce the complete program. On a repair request, return only changed/new files, with their COMPLETE contents.
 Use <file path="src/path/to/file.py">file content</file> for each file.

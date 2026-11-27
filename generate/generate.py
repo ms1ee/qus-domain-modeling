@@ -153,7 +153,7 @@ def main():
     parser.add_argument("--modeling", action="store_true", help="PRD -> Modeling -> Code")
     parser.add_argument('--max-repairs', type=int, default=20, help='Repair requests after initial generation (default: 20)')
     parser.add_argument('--feedback-level', type=int, choices=(1, 2, 3), default=DEFAULT_FEEDBACK_LEVEL,
-                        help='1: score (default); 2: score and item outcomes; 3: detailed failures and history')
+                        help='1: score (default); 2: score and item outcomes; 3: detailed failures; all include level-filtered repair history')
     parser.add_argument('--seed-base', type=int,
                         help='LM Studio only: repetition i uses base+i (default: 42)')
     args = parser.parse_args()

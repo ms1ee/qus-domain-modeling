@@ -42,7 +42,7 @@ def record_round(run_dir: Path, state: dict, record: dict) -> None:
                if value['status'] != 'pass'} if validation else {})
     entry = {key: record.get(key) for key in ('round', 'source_hash', 'changed_paths',
               'response_status', 'request_started_at', 'elapsed_seconds', 'llm_seconds',
-              'validation_seconds', 'usage', 'repeat_of_round', 'tag_cleanup')}
+              'validation_seconds', 'usage', 'repeat_of_round', 'validation_round', 'tag_cleanup')}
     entry.update(passed=score, total=total, failed_items=failed)
     state['rounds'] = [r for r in state['rounds'] if r['round'] != number] + [entry]
     requested = record.get('request_started_at') is not None or record.get('response_status') is not None

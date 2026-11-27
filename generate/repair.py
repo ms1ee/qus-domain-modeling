@@ -137,7 +137,7 @@ def run_trial(llm, *, identity: dict, fixed: dict, run_dir: Path, max_repairs: i
                                                 format_error=feedback, feedback_level=feedback_level),
                           'rendered_tokens': None, 'input_budget': None, 'omissions': [],
                           'feedback_level': feedback_level,
-                          'history_mode': 'full' if feedback_level == 3 else 'none', 'error_chars': 6000}
+                          'history_mode': 'full', 'error_chars': 6000}
             prompt = packed.pop('prompt')
             (directory / 'prompt.txt').write_text(prompt, encoding='utf-8')
             write_json(directory / 'context.json', packed)
@@ -195,8 +195,8 @@ def run_trial(llm, *, identity: dict, fixed: dict, run_dir: Path, max_repairs: i
             if record['response_status'] == 'complete':
                 if validation is None or validation['source_hash'] != current_hash:
                     # A new revision cannot inherit the previous revision's test score.
-                    validation = None
-                    record['validation'] = None
+                    validation, validation_round = None, None
+                    record.update(validation=None, validation_round=None)
                     phase = 'evaluating'
                     state['phase'] = phase
                     write_json(run_dir / 'run.json', state)
@@ -241,6 +241,7 @@ def run_trial(llm, *, identity: dict, fixed: dict, run_dir: Path, max_repairs: i
                           elapsed_seconds=time.monotonic() - started)
             if validation and validation['source_hash'] != record['source_hash']:
                 record['validation'] = None
+            record['validation_round'] = validation_round if record['validation'] is not None else None
             record_round(run_dir, state, record)
         finish_trial(run_dir, state, status, validation, error)
         if isinstance(error, (KeyboardInterrupt, SystemExit)):

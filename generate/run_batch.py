@@ -280,7 +280,7 @@ def main(argv=None):
     parser.add_argument('--max-repairs', type=int, default=20,
                         help='Repair requests after initial generation per trial (default: 20; 0 allowed)')
     parser.add_argument('--feedback-level', type=int, choices=(1, 2, 3), default=DEFAULT_FEEDBACK_LEVEL,
-                        help='1: score (default); 2: score and item outcomes; 3: detailed failures and history')
+                        help='1: score (default); 2: score and item outcomes; 3: detailed failures; all include level-filtered repair history')
     parser.add_argument('--seed-base', type=int, default=DEFAULT_SEED_BASE,
                         help='Independent repetition i uses base+i for both models (default: 42)')
     parser.add_argument('--run-name', help='Fresh output directory name; generated automatically by default')

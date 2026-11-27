@@ -8,6 +8,7 @@ import pytest
 from conftest import completion, snapshot
 from test_batch import batch_repo, execute, CODE, DOMAIN
 from test_repair import BAD, GOOD
+from test_feedback import section
 
 
 @pytest.mark.parametrize('key', ['qwen/qwen3-coder-30b', 'openai/gpt-oss-20b'])
@@ -42,7 +43,11 @@ def test_seed_is_stable_across_modeling_repairs_retries_and_old_usage_snapshots(
     assert [r['seed'] for r in requests] == [44, 44, 44, 44, 45]
     assert requests[2] == requests[3], 'transport retries must preserve the request'
     assert 'test_sum.py' not in requests[2]['messages'][0]['content']
-    assert '<RepairHistory>' not in requests[2]['messages'][0]['content']
+    history = section(requests[2]['messages'][0]['content'], 'RepairHistory')
+    assert len(history) == 1 and history[0]['round'] == 0
+    assert history[0]['failed_items'] == {'1.1': 'fail'}
+    assert section(requests[1]['messages'][0]['content'], 'RepairHistory') == []
+    assert section(requests[4]['messages'][0]['content'], 'RepairHistory') == []
     assert first['identity']['seed'] == 44 and second['identity']['seed'] == 45
     assert first['settings']['sampling']['seed'] == 44
     assert first['rounds'][0]['usage'] == usage_before

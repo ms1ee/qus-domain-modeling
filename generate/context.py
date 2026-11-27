@@ -40,7 +40,7 @@ def _validation_view(validation, limit, level):
     return view
 
 
-def _history_view(history, mode):
+def _history_view(history, mode, feedback_level):
     if mode == 'none':
         return []
     rows = []
@@ -48,10 +48,16 @@ def _history_view(history, mode):
         recent = index >= len(history) - 2
         if not recent and mode == 'recent':
             continue
-        keys = ('round', 'passed', 'total', 'changed_paths', 'response_status', 'failed_items')
+        keys = ('round', 'passed', 'total', 'changed_paths', 'response_status',
+                'repeat_of_round', 'validation_round')
         row = {key: item.get(key) for key in keys}
+        if feedback_level == 2:
+            # History must not reveal error/skip/timeout details hidden by level 2.
+            row['failed_items'] = {metric: 'fail' for metric in (item.get('failed_items') or {})}
+        elif feedback_level == 3:
+            row['failed_items'] = item.get('failed_items')
         if recent:
-            row.update(source_hash=item.get('source_hash'), repeat_of_round=item.get('repeat_of_round'))
+            row['source_hash'] = item.get('source_hash')
         rows.append(row)
     return rows
 
@@ -74,18 +80,17 @@ def build_prompt(fixed: dict, files: dict[str, str], validation: dict | None, hi
                                                        ensure_ascii=False, indent=2) + '\n</LatestValidation>')
     if format_error:
         sections.append('<ResponseFeedback>\n' + _excerpt(format_error, error_chars) + '\n</ResponseFeedback>')
-    if feedback_level == 3:
-        sections.append('<RepairHistory>\n' + json.dumps(_history_view(history, history_mode),
-                                                        ensure_ascii=False) + '\n</RepairHistory>')
+    sections.append('<RepairHistory>\n' + json.dumps(_history_view(history, history_mode, feedback_level),
+                                                    ensure_ascii=False) + '\n</RepairHistory>')
     return '\n\n'.join(sections)
 
 
 def fit_prompt(fixed: dict, files: dict, validation: dict | None, history: list[dict], *, preflight,
                format_error: str | None = None, feedback_level=DEFAULT_FEEDBACK_LEVEL) -> dict:
     validate_feedback_level(feedback_level)
-    policies = ([('full', 6000), ('recent', 6000), ('none', 6000), ('none', 1500), ('none', 400)]
-                if feedback_level == 3 else [('none', 6000)] +
-                ([('none', 1500), ('none', 400)] if format_error else []))
+    policies = [('full', 6000), ('recent', 6000), ('none', 6000)]
+    if feedback_level == 3 or format_error:
+        policies.extend([('none', 1500), ('none', 400)])
     for mode, chars in policies:
         prompt = build_prompt(fixed, files, validation, history, format_error=format_error,
                               history_mode=mode, error_chars=chars, feedback_level=feedback_level)
@@ -94,9 +99,9 @@ def fit_prompt(fixed: dict, files: dict, validation: dict | None, history: list[
         budget = context - fixed.get('output_reserve_tokens', 8192) - fixed.get('template_margin_tokens', 1024)
         if measured['tokens'] <= budget:
             omissions = []
-            if feedback_level == 3 and mode != 'full':
+            if mode != 'full':
                 omissions.append('older_history')
-            if feedback_level == 3 and mode == 'none':
+            if mode == 'none':
                 omissions.append('recent_history')
             if chars < 6000:
                 label = 'failure_excerpts' if feedback_level == 3 else 'response_feedback'
