@@ -3,7 +3,7 @@ import time
 from abc import ABC, abstractmethod
 from config import *
 from context import ContextBudgetError
-from experiment import iteration_seed
+from experiment import iteration_seed, validate_feedback_level
 from model_output import (OUTPUT_FEEDBACK, api_error_details, capture_server_logs,
                           classify_parser_error, completion_status)
 
@@ -66,6 +66,7 @@ class LMStudio(LLM):
 
         self.profile = lmstudio_runtime.load_profile(model_id)
         self.seed = iteration_seed(self.profile['sampling']['seed'], 0)
+        self.feedback_level = 3
         base_url, self.model_id = lmstudio_runtime.connection(self.profile)
         self.base_url = base_url
         self.runtime = lmstudio_runtime.Runtime(self.profile, base_url, self.model_id)
@@ -86,11 +87,14 @@ class LMStudio(LLM):
         if state['identifier'] != self.model_id:
             raise ValueError('LM Studio runtime mismatch: identifier')
         self.settings = {'sampling': {**self.profile['sampling'], 'seed': self.seed},
+                         'feedback_level': self.feedback_level,
                          'api': self.profile['api'], 'runtime': state}
 
-    def set_seed(self, seed):
-        """Select a trial seed without mutating the profile or prior usage snapshots."""
+    def set_trial_options(self, *, seed, feedback_level):
+        """Select trial conditions without mutating prior usage snapshots."""
+        validate_feedback_level(feedback_level)
         self.seed = iteration_seed(seed, 0)
+        self.feedback_level = feedback_level
         self._record_runtime(self.settings['runtime'])
 
     def chat(self, user_prompt):
@@ -121,7 +125,8 @@ class LMStudio(LLM):
                 budget = context - api['output_reserve_tokens'] - api['template_margin_tokens']
                 if input_tokens > budget:
                     raise ContextBudgetError(f'Input needs {input_tokens} tokens; context input budget is {budget}/{context}. '
-                                     'PRD/domain model was not truncated. Prepare a larger context before retrying.')
+                                     'The required input exceeds the available budget for this experiment. '
+                                     'PRD/domain model was not truncated.')
                 try:
                     log_cursor = capture_server_logs(self.base_url)
                     http_attempts += 1

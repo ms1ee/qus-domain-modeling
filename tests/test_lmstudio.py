@@ -65,8 +65,10 @@ def test_context_overflow_is_rejected_without_changing_prd(endpoint, runtime_fix
     runtime_fixture.tokens = 24000
     with endpoint([(200, completion())]) as (url, received):
         monkeypatch.setenv('LMSTUDIO_API_BASE', url)
-        with pytest.raises(ValueError, match='context'):
+        with pytest.raises(ValueError, match='context') as error:
             make_llm('Qwen3-Coder-30B').chat('must preserve every requirement')
+        assert 'Prepare a larger context' not in str(error.value)
+        assert '23552/32768' in str(error.value)
         assert received == []
 
 

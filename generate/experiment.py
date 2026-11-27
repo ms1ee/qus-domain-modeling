@@ -1,7 +1,8 @@
 """Shared validation of experiment conditions before any model work."""
 
 DEFAULT_SEED_BASE = 42
-MAX_SEED = 2**32 - 1
+# llama.cpp reserves UINT32_MAX for a fresh random seed, not a fixed seed.
+MAX_SEED = 2**32 - 2
 
 
 def validate_feedback_level(level):
@@ -13,7 +14,8 @@ def validate_feedback_level(level):
 def iteration_seed(base, index):
     if (type(base) is not int or type(index) is not int or index < 0
             or not 0 <= base <= MAX_SEED or base + index > MAX_SEED):
-        raise ValueError('seed base and every repetition seed must be integers between 0 and 4294967295')
+        raise ValueError('seed base and every repetition seed must be integers between 0 and 4294967294; '
+                         '4294967295 is reserved for random seeding')
     return base + index
 
 

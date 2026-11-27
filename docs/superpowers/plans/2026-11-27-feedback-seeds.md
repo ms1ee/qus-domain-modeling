@@ -29,21 +29,31 @@
 **Files:** `generate/context.py`, `generate/repair.py`, `generate/generate.py`, new `generate/experiment.py`, `tests/test_context.py`, `tests/test_feedback.py`.
 **Interfaces:** validate_feedback_level(level); build_prompt/fit_prompt(..., feedback_level=3); run_once(..., feedback_level=3). Trial identity carries feedback_level. Context records history_mode/error_chars/feedback_level.
 
-- [ ] Add RED tests for literal level projections, no history/detail leakage, preserved common format feedback, overflow behavior, real repair logs and unchanged scoring.
-- [ ] Implement filtering before prompt assembly, shared validation and repair-loop propagation. Keep default level 3 behavior.
-- [ ] Run affected tests and full pytest, inspect outcomes, commit.
+- [x] Add RED tests for literal level projections, no history/detail leakage, preserved common format feedback, overflow behavior, real repair logs and unchanged scoring.
+- [x] Implement filtering before prompt assembly, shared validation and repair-loop propagation. Keep default level 3 behavior.
+- [x] Run affected tests and full pytest, inspect outcomes, commit.
 
 ### Task 2: Repetition seeds, model settings and CLI integration
 
 **Files:** `generate/experiment.py`, `generate/llm.py`, `generate/lmstudio_profiles.json`, `generate/generate.py`, `generate/run_batch.py`, `eval/evaluate.py`, tests and README files.
-**Interfaces:** iteration_seed(base, index), seed_schedule(base,count); LMStudio.set_seed(seed); run_once(..., seed=None). --seed-base, --feedback-level propagated by batch; identity includes actual seed; SUMMARY_FIELDS includes seed/feedback_level.
+**Interfaces:** iteration_seed(base, index), seed_schedule(base,count); LMStudio.set_trial_options(seed=..., feedback_level=...); run_once(..., seed=None). --seed-base, --feedback-level propagated by batch; identity includes actual seed; SUMMARY_FIELDS includes seed/feedback_level.
 
-- [ ] Add RED real HTTP/batch tests for both models, repeated direct/modeling trials, repair/retry stability, settings snapshots, summary grouping and mismatched reuse rejection. Update fixture runtime expectations to the new requested settings.
-- [ ] Implement validated scheduling, provider-specific seed setup, fresh sampling snapshots and model profile changes. Add CLI flags, early validation, manifest and summary fields, skip guards.
-- [ ] Update usage docs with three feedback conditions, 3/5 repetitions, explicit seed base, 32K context and medium reasoning. Explain same seed within repairs and actual feedback truncation.
-- [ ] Run full pytest and no-model dry runs; commit.
+- [x] Add RED real HTTP/batch tests for both models, repeated direct/modeling trials, repair/retry stability, settings snapshots, summary grouping and mismatched reuse rejection. Update fixture runtime expectations to the new requested settings.
+- [x] Implement validated scheduling, provider-specific seed setup, fresh sampling snapshots and model profile changes. Add CLI flags, early validation, manifest and summary fields, skip guards.
+- [x] Update usage docs with three feedback conditions, 3/5 repetitions, explicit seed base, 32K context and medium reasoning. Explain same seed within repairs and actual feedback truncation.
+- [x] Run full pytest and no-model dry runs; commit.
 
 ### Task 3: Review and delivery
 
-- [ ] One fresh read-only reviewer checks the entire branch; reproduce and fix material findings, then full verification.
+- [x] One fresh read-only reviewer checks the entire branch; reproduce and fix material findings, then full verification.
 - [ ] Verify benchmark/old outputs unchanged; fast-forward the requested branch to the verified commits; remove the clean temporary worktree. Do not push or start an experiment.
+
+
+## Verification record
+
+- Task 1: 15 feature tests failed before implementation; 209 regression tests passed afterward.
+- Task 2: 9 feature tests failed before implementation; 226 regression tests passed afterward.
+- Final review: accepted all 3 Important findings and 1 Minor finding. Ten failing regression cases reproduced them; targeted verification then passed 57 tests. Fixed reserved random seed rejection, complete request-condition metadata, read-only conflict/skip preflight, and context-budget guidance.
+- Final full suite: **231 passed in 127.93s**, including local HTTP/SDK fixtures and the Node runtime contract tests. No real model inference was used.
+- Dry runs confirmed default five-repeat seeds 42,43,44,45,46 and custom-base repetition schedules. Benchmark is unchanged from 238134e; all 4,212 archived output hashes still match.
+- Real model output quality and strict output reproducibility were not measured in this implementation task.

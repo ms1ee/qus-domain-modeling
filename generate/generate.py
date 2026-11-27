@@ -56,7 +56,7 @@ def run_once(llm, task, prd, use_modeling, run_dir, *, max_repairs=30, prd_name=
         raise FileExistsError(f'Trial directory is not empty; use a new run name: {run_dir}')
     if isinstance(llm, LMStudio):
         seed = iteration_seed(DEFAULT_SEED_BASE, nth) if seed is None else iteration_seed(seed, 0)
-        llm.set_seed(seed)
+        llm.set_trial_options(seed=seed, feedback_level=feedback_level)
     elif seed is not None:
         raise ValueError('Explicit seed control is supported only for LM Studio models')
     benchmark = Path(BENCHMARK_DIR) / task
@@ -178,14 +178,11 @@ def main():
     with open(prd_path, encoding="utf-8") as f:
         prd = f.read()
 
-    llm = make_llm(args.model)
-    if isinstance(llm, LMStudio):
-        llm.set_seed(seeds[0])
     outdir = os.path.join(OUTDIR_BASE, args.model, args.outdir)
-    os.makedirs(outdir, exist_ok=True)
-    log_gen_info(outdir, args, llm)
-
     pipeline = "modeling" if args.modeling else "direct"
+    pending = []
+    # Check every existing trial before starting any missing trial or appending
+    # settings. A rejected condition must leave the recorded experiment intact.
     for i in range(args.iters):
         run_dir = os.path.join(outdir, "%s-%s-%s-iter-%d" % (args.task, args.prd, pipeline, i))
         state_path = Path(run_dir) / 'run.json'
@@ -199,6 +196,18 @@ def main():
                 print('[*] Skip %s (%s)' % (run_dir, previous['status']))
                 continue
             raise RuntimeError('Existing trial is incomplete or differs from this request; use a new outdir: ' + run_dir)
+        if Path(run_dir).exists() and any(Path(run_dir).iterdir()):
+            raise RuntimeError('Existing trial is incomplete; use a new outdir: ' + run_dir)
+        pending.append((i, run_dir))
+
+    if pending:
+        llm = make_llm(args.model)
+        if isinstance(llm, LMStudio):
+            llm.set_trial_options(seed=seeds[pending[0][0]], feedback_level=args.feedback_level)
+        os.makedirs(outdir, exist_ok=True)
+        log_gen_info(outdir, args, llm)
+
+    for i, run_dir in pending:
         print("[*] Generating %s" % run_dir)
         state = run_once(llm, args.task, prd, args.modeling, run_dir, max_repairs=args.max_repairs,
                          prd_name=args.prd, nth=i, feedback_level=args.feedback_level, seed=seeds[i])

@@ -47,6 +47,10 @@ def test_seed_is_stable_across_modeling_repairs_retries_and_old_usage_snapshots(
     assert first['settings']['sampling']['seed'] == 44
     assert first['rounds'][0]['usage'] == usage_before
     assert usage_before['settings']['sampling']['seed'] == 44
+    assert usage_before['settings']['feedback_level'] == 2
+    assert first['modeling_usage']['settings']['feedback_level'] == 2
+    assert first['rounds'][1]['usage']['settings']['feedback_level'] == 2
+    assert second['rounds'][0]['usage']['settings']['feedback_level'] == 3
     assert model.profile['sampling']['seed'] == 42
     assert all(r.get('reasoning_effort') == ('medium' if name == 'gpt-oss-20b' else None) for r in requests)
 
@@ -91,7 +95,8 @@ def test_five_default_repetitions_are_distinct_and_visible_in_dry_run(batch_repo
 
 
 @pytest.mark.parametrize('args', [('--feedback-level', '0'), ('--feedback-level', '4'),
-    ('--seed-base', '-1'), ('--seed-base', '4294967295', '--iters', '2')])
+    ('--seed-base', '-1'), ('--seed-base', '4294967295'),
+    ('--seed-base', '4294967294', '--iters', '2')])
 def test_invalid_conditions_fail_before_loading_or_creating_output(batch_repo, args):
     repo, env = batch_repo
     result = execute(repo, env, *args)
@@ -110,11 +115,54 @@ def test_manual_generator_cannot_skip_trial_from_different_conditions(
         monkeypatch.setenv('LMSTUDIO_API_BASE', url)
         monkeypatch.setattr(sys, 'argv', argv)
         generate.main()
+        config = tmp_path / 'gpt-oss-20b/manual/gen.config'
+        original_config = config.read_bytes()
         generate.main()  # Same conditions may reuse a verified, finished trial.
+        assert config.read_bytes() == original_config, 'a skipped request must not append settings'
         monkeypatch.setattr(sys, 'argv', argv + list(changed_args))
         with pytest.raises(RuntimeError, match='different|differs'):
             generate.main()
+        assert config.read_bytes() == original_config, 'a rejected request must not append settings'
     assert len(requests) == 1
+
+
+def test_later_conflicting_trial_is_rejected_before_earlier_missing_trial_runs(
+        tiny_benchmark, tmp_path, endpoint, runtime_fixture, monkeypatch):
+    import generate
+    from llm import make_llm
+    monkeypatch.setattr(generate, 'OUTDIR_BASE', str(tmp_path))
+    monkeypatch.setattr(signal, 'signal', lambda *args: None)
+    output = tmp_path / 'gpt-oss-20b/manual'
+    with endpoint([(200, completion(GOOD))]) as (url, requests):
+        monkeypatch.setenv('LMSTUDIO_API_BASE', url)
+        state = generate.run_once(make_llm('gpt-oss-20b'), '44', 'Add integers.', False,
+                                  output / '44-vanilla-direct-iter-1', nth=1,
+                                  feedback_level=1, max_repairs=0)
+        assert state['status'] == 'passed'
+        monkeypatch.setattr(sys, 'argv', ['generate.py', 'gpt-oss-20b', '44', 'vanilla', '2', 'manual',
+                                        '--max-repairs', '0', '--feedback-level', '3'])
+        with pytest.raises(RuntimeError, match='different|differs'):
+            generate.main()
+    assert len(requests) == 1, 'the earlier missing trial must not start before conflict checking'
+    assert not (output / '44-vanilla-direct-iter-0').exists()
+    assert not (output / 'gen.config').exists()
+
+
+@pytest.mark.parametrize('modeling', [True, False])
+def test_failed_trial_request_records_feedback_and_seed(
+        modeling, tiny_benchmark, tmp_path, endpoint, runtime_fixture, monkeypatch):
+    import generate
+    from llm import make_llm
+    with endpoint([(400, {'error': {'message': 'request rejected'}})]) as (url, requests):
+        monkeypatch.setenv('LMSTUDIO_API_BASE', url)
+        run_dir = tmp_path / 'failed'
+        state = generate.run_once(make_llm('gpt-oss-20b'), '44', 'Add integers.', modeling,
+                                  run_dir, feedback_level=1, seed=123, max_repairs=0)
+    assert state['status'] == 'api_error' and len(requests) == 1
+    path = run_dir / ('modeling-usage.json' if modeling else 'rounds/000/usage.json')
+    usage = json.loads(path.read_text())
+    assert usage['settings']['feedback_level'] == 1
+    assert usage['settings']['sampling']['seed'] == 123
 
 
 @pytest.mark.parametrize('model,args', [
@@ -132,15 +180,16 @@ def test_manual_invalid_seed_conditions_fail_before_provider_construction(model,
     assert error.value.code == 2 and not list(tmp_path.iterdir())
 
 
-def test_explicit_zero_seed_is_sent_to_the_api(tiny_benchmark, tmp_path, endpoint, runtime_fixture, monkeypatch):
+@pytest.mark.parametrize('seed', [0, 4294967294])
+def test_explicit_boundary_seed_is_sent_to_the_api(seed, tiny_benchmark, tmp_path, endpoint, runtime_fixture, monkeypatch):
     import generate
     from llm import make_llm
     with endpoint([(200, completion(GOOD))]) as (url, requests):
         monkeypatch.setenv('LMSTUDIO_API_BASE', url)
         state = generate.run_once(make_llm('gpt-oss-20b'), '44', 'Add integers.', False,
-                                  tmp_path / 'zero', seed=0, max_repairs=0)
-    assert state['status'] == 'passed' and state['identity']['seed'] == 0
-    assert requests[0]['seed'] == 0
+                                  tmp_path / 'boundary', seed=seed, max_repairs=0)
+    assert state['status'] == 'passed' and state['identity']['seed'] == seed
+    assert requests[0]['seed'] == seed
 
 
 def test_summary_never_pools_different_feedback_conditions(tmp_path, capsys):

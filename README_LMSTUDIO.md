@@ -303,7 +303,8 @@ OS 파일 캐시를 재시작하는 것은 아니다. `both`의 두 방식과 `-
 세 수준을 비교하려면 위처럼 새 실행 이름으로 각각 시작한다. 기본 `direct`에서
 두 모델 × 세 프로젝트 × 5회 반복은 수준당 30개 독립 실험이다.
 
-시작 seed와 마지막 seed가 허용 범위를 벗어나면 모델 로드 전에 거절한다.
+시작 seed와 마지막 seed가 허용 범위 `0`~`4294967294`를 벗어나면 모델 로드 전에 거절한다.
+백엔드가 무작위 seed로 처리하는 예약값 `4294967295`도 사용하지 않는다.
 수동 `generate.py`에도 두 옵션을 사용할 수 있다. `--seed-base`는 LM Studio 전용이며
 Claude에 명시하면 거절한다. Claude 결과의 `seed`는 미지정(`null`)으로 기록한다.
 
@@ -382,7 +383,8 @@ output/
 집계의 `passed`는 **최종 점수**이며 `best_passed`와 다를 수 있다. CSV의 빈 점수 칸은 미측정이다.
 서버가 제공하지 않은 토큰 통계도 0으로 추정하지 않고 `null`로 기록한다.
 개별 `run.json`의 `identity`, `result.json`, `summary.csv/json`에 `feedback_level`과 실제
-`seed`를 기록한다. 요청별 `usage.json`에도 실제 sampling seed가 남는다.
+`seed`를 기록한다. 요청별 `usage.json`의 `settings`에도 `feedback_level`과 실제
+sampling seed가 남으며, 도메인 모델 생성 요청과 실패한 API 요청도 동일하게 기록한다.
 수준이 다른 결과를 콘솔 평균에 합치지 않는다. 예전 결과에 기록이 없던 조건은 미상으로
 유지하며, 다른 수준·seed의 완료 결과를 새 요청의 결과로 건너뛰어 재사용하지 않는다.
 
