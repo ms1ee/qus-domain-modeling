@@ -65,7 +65,7 @@ models
   Edge(source, dest, distance, line)              # source/dest: station numbers; attrs: weight (= distance), line
   Graph()                                         # station numbers are assigned by the caller, not by Graph
     set_station_lines(station_name, lines)
-    add_edge(edge)                                # accepts any station numbers used by the edges
+    add_edge(edge)
     station_lines: dict[station name, list[str]]
 pathfinding
   PathfindingConfig()                             # attrs: mode, max_transfers, preferred_lines (list[str])
