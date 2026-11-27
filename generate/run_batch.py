@@ -179,7 +179,7 @@ def execute(plan):
         commit = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True, text=True)
         dirty = subprocess.run(['git', 'status', '--porcelain'], cwd=ROOT, capture_output=True, text=True)
         save_json(batch / 'manifest.json', {**plan, 'started_at': timestamp(),
-                  'model_reload_policy': 'per_project',
+                  'model_reload_policy': 'per_trial',
                   'tag_cleanup_policy': TAG_CLEANUP_POLICY,
                   'python': sys.executable, 'commit': commit.stdout.strip() if commit.returncode == 0 else None,
                   'working_tree_dirty': bool(dirty.stdout) if dirty.returncode == 0 else None,
@@ -206,39 +206,44 @@ def execute(plan):
                     base_env = {**os.environ, 'PYTHONUNBUFFERED': '1', 'PYTHONDONTWRITEBYTECODE': '1'}
                     status['runtime'][model] = {}
                     for task in plan['projects']:
-                        # Each project gets fresh inference state. The nonce also protects
-                        # ownership if an archived human-readable run name is reused later.
-                        identifier = f'qus-{plan["run_name"]}-{alias}-{task}-{uuid.uuid4().hex[:12]}'
-                        runtime = Runtime(profile, base_url, identifier)
-                        env = {**base_env, profile['identifier_env']: identifier}
-                        loaded = None
-                        try:
-                            stage(f'PREPARE {model}/{task}')
-                            with defer_lifecycle_interrupts():
-                                loaded = runtime.prepare(exclusive=True)
-                            status['runtime'][model][task] = loaded
-                            save_json(batch / f'{alias}-{task}-runtime.json', loaded)
-                            for pipeline in plan['pipelines']:
-                                label = f'{alias}-{task}-{pipeline}'
-                                stage(f'GENERATE {model}/{task}/{pipeline}')
-                                command = [sys.executable, '-u', str(ROOT / 'generate/generate.py'),
-                                           model, task, plan['prd'], str(plan['iters']), plan['run_name'],
-                                           '--max-repairs', str(plan.get('max_repairs', 20)),
-                                           '--feedback-level', str(plan['feedback_level']),
-                                           '--seed-base', str(plan['seed_base'])]
-                                if pipeline == 'modeling':
-                                    command.append('--modeling')
-                                run_command(command, env, batch / 'logs' / f'{label}.log', emit)
+                        status['runtime'][model][task] = {}
+                        for pipeline in plan['pipelines']:
+                            status['runtime'][model][task][pipeline] = {}
+                            for iteration, seed in enumerate(plan['seeds']):
+                                # Every independent trial owns fresh inference state. Modeling,
+                                # initial generation and repairs within it share this instance.
+                                label = f'{alias}-{task}-{pipeline}-iter-{iteration}'
+                                identifier = f'qus-{plan["run_name"]}-{label}-{uuid.uuid4().hex[:12]}'
+                                runtime = Runtime(profile, base_url, identifier)
+                                env = {**base_env, profile['identifier_env']: identifier}
+                                loaded = None
+                                try:
+                                    stage(f'PREPARE {model}/{task}/{pipeline}/iter-{iteration} seed={seed}')
+                                    with defer_lifecycle_interrupts():
+                                        loaded = runtime.prepare(exclusive=True)
+                                    status['runtime'][model][task][pipeline][str(iteration)] = loaded
+                                    save_json(batch / f'{label}-runtime.json', loaded)
+                                    stage(f'GENERATE {model}/{task}/{pipeline}/iter-{iteration}')
+                                    command = [sys.executable, '-u', str(ROOT / 'generate/generate.py'),
+                                               model, task, plan['prd'], str(plan['iters']), plan['run_name'],
+                                               '--iteration-index', str(iteration),
+                                               '--max-repairs', str(plan.get('max_repairs', 20)),
+                                               '--feedback-level', str(plan['feedback_level']),
+                                               '--seed-base', str(plan['seed_base'])]
+                                    if pipeline == 'modeling':
+                                        command.append('--modeling')
+                                    run_command(command, env, batch / 'logs' / f'{label}.log', emit)
+                                finally:
+                                    if loaded is not None:
+                                        with defer_lifecycle_interrupts():
+                                            try:
+                                                stage(f'UNLOAD {identifier}')
+                                            finally:
+                                                runtime.unload(loaded['instance_reference'])
                                 status['completed_jobs'].append({'model': model, 'task': task,
-                                                                'pipeline': pipeline})
+                                                                'pipeline': pipeline, 'iter': iteration,
+                                                                'seed': seed})
                                 save_json(batch / 'status.json', status)
-                        finally:
-                            if loaded is not None:
-                                with defer_lifecycle_interrupts():
-                                    try:
-                                        stage(f'UNLOAD {identifier}')
-                                    finally:
-                                        runtime.unload(loaded['instance_reference'])
                     stage(f'EVALUATE {model}')
                     run_command([sys.executable, '-u', str(ROOT / 'eval/evaluate.py'), model,
                                  plan['run_name']], base_env, batch / 'logs' / f'{alias}-evaluation.log', emit)

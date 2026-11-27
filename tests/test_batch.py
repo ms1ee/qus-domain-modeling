@@ -190,8 +190,8 @@ def test_selected_gptoss_batch_runs_only_44_then_29(batch_repo, endpoint):
     batch = repo / 'output/batches/fixture'
     status = json.loads((batch / 'status.json').read_text())
     assert status['completed_jobs'] == [
-        {'model': 'gpt-oss-20b', 'task': '44', 'pipeline': 'direct'},
-        {'model': 'gpt-oss-20b', 'task': '29', 'pipeline': 'direct'}]
+        {'model': 'gpt-oss-20b', 'task': '44', 'pipeline': 'direct', 'iter': 0, 'seed': 42},
+        {'model': 'gpt-oss-20b', 'task': '29', 'pipeline': 'direct', 'iter': 0, 'seed': 42}]
     manifest = json.loads((batch / 'manifest.json').read_text())
     assert manifest['models'] == ['gpt-oss-20b'] and manifest['projects'] == ['44', '29']
     assert not (repo / 'output/Qwen3-Coder-30B').exists()
@@ -236,31 +236,32 @@ def test_full_batch_orders_models_and_generates_evaluates_records_results(batch_
         result = execute(repo, env, '--pipeline', pipeline)
     assert result.returncode == 0, result.stdout + result.stderr
     events = Path(env['FIXTURE_EVENTS']).read_text().splitlines()
-    assert events == (['load qwen/qwen3-coder-30b', 'unload qwen/qwen3-coder-30b'] * 3
-                      + ['load openai/gpt-oss-20b', 'unload openai/gpt-oss-20b'] * 3)
+    pipelines = ['direct'] if pipeline == 'direct' else ['direct', 'modeling']
+    assert events == (['load qwen/qwen3-coder-30b', 'unload qwen/qwen3-coder-30b'] * (3 * len(pipelines))
+                      + ['load openai/gpt-oss-20b', 'unload openai/gpt-oss-20b'] * (3 * len(pipelines)))
     assert len(requests) == (6 if pipeline == 'direct' else 18)
-    calls_per_project = 1 if pipeline == 'direct' else 3
-    project_ids = [requests[i]['model'] for i in range(0, len(requests), calls_per_project)]
-    assert len(set(project_ids)) == 6, 'Projects must use distinct model instances'
-    for start in range(0, len(requests), calls_per_project):
-        assert {r['model'] for r in requests[start:start + calls_per_project]} == {requests[start]['model']}
+    assert len({r['model'] for r in requests}) == rows, 'Every independent trial needs a fresh instance'
     assert all(r['temperature'] == .7 and r['seed'] == 42 for r in requests[:len(requests)//2])
     assert all(r['temperature'] == 1 and r['reasoning_effort'] == 'medium' for r in requests[len(requests)//2:])
     batch = repo / 'output/batches/fixture'
     status = json.loads((batch / 'status.json').read_text())
     assert status['status'] == 'completed'
-    for model, alias, ids in [('Qwen3-Coder-30B', 'qwen', project_ids[:3]),
-                             ('gpt-oss-20b', 'gptoss', project_ids[3:])]:
-        for task, identifier in zip(('37', '44', '29'), ids):
-            runtime = json.loads((batch / f'{alias}-{task}-runtime.json').read_text())
-            assert runtime['identifier'] == identifier
-            assert status['runtime'][model][task] == runtime
+    offset = 0
+    for model, alias in [('Qwen3-Coder-30B', 'qwen'), ('gpt-oss-20b', 'gptoss')]:
+        for task in ('37', '44', '29'):
+            for selected in pipelines:
+                runtime = json.loads((batch / f'{alias}-{task}-{selected}-iter-0-runtime.json').read_text())
+                calls = 1 if selected == 'direct' else 2
+                assert {r['model'] for r in requests[offset:offset + calls]} == {runtime['identifier']}
+                assert status['runtime'][model][task][selected]['0'] == runtime
+                assert (batch / 'logs' / f'{alias}-{task}-{selected}-iter-0.log').is_file()
+                offset += calls
     summary = list(csv.DictReader((batch / 'summary.csv').open()))
     assert len(summary) == rows
     assert all(r['passed'] == '1' and r['total'] == '1' for r in summary)
     assert all(r['status'] == 'passed' and r['repairs_used'] == '0' for r in summary)
     assert json.loads((batch / 'manifest.json').read_text())['max_repairs'] == 20
-    assert json.loads((batch / 'manifest.json').read_text())['model_reload_policy'] == 'per_project'
+    assert json.loads((batch / 'manifest.json').read_text())['model_reload_policy'] == 'per_trial'
     assert {r['model'] for r in summary} == {'Qwen3-Coder-30B', 'gpt-oss-20b'}
     assert json.loads(Path(env['FIXTURE_MODELS']).read_text()) == []
     assert 'All generations done' in (batch / 'run.log').read_text()
@@ -296,7 +297,8 @@ def test_failure_in_second_project_cleans_new_instance_and_stops_remaining_jobs(
     batch = repo / 'output/batches/fixture'
     status = json.loads((batch / 'status.json').read_text())
     assert status['status'] == 'failed'
-    assert status['completed_jobs'] == [{'model': 'Qwen3-Coder-30B', 'task': '37', 'pipeline': 'direct'}]
+    assert status['completed_jobs'] == [
+        {'model': 'Qwen3-Coder-30B', 'task': '37', 'pipeline': 'direct', 'iter': 0, 'seed': 42}]
     rows = list(csv.DictReader((batch / 'summary.csv').open()))
     assert len(rows) == 2 and {row['status'] for row in rows} == {'passed', 'api_error'}
 
@@ -363,8 +365,8 @@ def test_repair_limit_continues_all_jobs_with_independent_iterations(batch_repo,
         result = execute(repo, env, '--max-repairs', '0', '--iters', '2')
     assert result.returncode == 0, result.stdout + result.stderr
     assert len(requests) == 12
-    assert len({r['model'] for r in requests}) == 6
-    assert all(requests[i]['model'] == requests[i + 1]['model'] for i in range(0, 12, 2))
+    assert len({r['model'] for r in requests}) == 12
+    assert all(requests[i]['model'] != requests[i + 1]['model'] for i in range(0, 12, 2))
     batch = repo / 'output/batches/fixture'
     rows = list(csv.DictReader((batch / 'summary.csv').open()))
     assert len(rows) == 12 and {row['iter'] for row in rows} == {'0', '1'}

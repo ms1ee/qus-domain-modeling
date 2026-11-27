@@ -133,6 +133,8 @@ def log_gen_info(outdir, args, llm):
             f.write("Effort: %s, Max tokens: %d\n" % (EFFORT, MAX_TOKENS))
         f.write("Task: %s, PRD: %s, Pipeline: %s, Iterations: %d\n"
                 % (args.task, args.prd, "modeling" if args.modeling else "direct", args.iters))
+        if getattr(args, 'iteration_index', None) is not None:
+            f.write("Selected iteration index: %d\n" % args.iteration_index)
         f.write("Start Time: %d\n" % int(time.time()))
         f.write("Max repairs after initial generation: %d\n" % getattr(args, 'max_repairs', 20))
         f.write("Feedback level: %d\n" % getattr(args, 'feedback_level', DEFAULT_FEEDBACK_LEVEL))
@@ -150,6 +152,8 @@ def main():
     parser.add_argument("prd", help="vanilla or <type>_defect (benchmark/<task>/<prd>_PRD.md)")
     parser.add_argument("iters", type=int)
     parser.add_argument("outdir", help="output/<model>/<outdir>")
+    parser.add_argument('--iteration-index', type=int,
+                        help='Run only this zero-based iteration from iters; preserve its index and seed')
     parser.add_argument("--modeling", action="store_true", help="PRD -> Modeling -> Code")
     parser.add_argument('--max-repairs', type=int, default=20, help='Repair requests after initial generation (default: 20)')
     parser.add_argument('--feedback-level', type=int, choices=(1, 2, 3), default=DEFAULT_FEEDBACK_LEVEL,
@@ -159,6 +163,8 @@ def main():
     args = parser.parse_args()
     if not 0 <= args.max_repairs <= 30 or args.iters < 1:
         parser.error('--max-repairs must be between 0 and 30 and iters must be positive')
+    if args.iteration_index is not None and not 0 <= args.iteration_index < args.iters:
+        parser.error('--iteration-index must be between 0 and iters - 1')
     local = MODELS[args.model][0] == 'lmstudio'
     if not local and args.seed_base is not None:
         parser.error('--seed-base is supported only for LM Studio models')
@@ -183,7 +189,8 @@ def main():
     pending = []
     # Check every existing trial before starting any missing trial or appending
     # settings. A rejected condition must leave the recorded experiment intact.
-    for i in range(args.iters):
+    iterations = range(args.iters) if args.iteration_index is None else [args.iteration_index]
+    for i in iterations:
         run_dir = os.path.join(outdir, "%s-%s-%s-iter-%d" % (args.task, args.prd, pipeline, i))
         state_path = Path(run_dir) / 'run.json'
         if state_path.exists():

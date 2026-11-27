@@ -74,20 +74,101 @@ def test_batch_pairs_seed_schedule_across_models_projects_and_pipelines(batch_re
     manifest = json.loads((repo / 'output/batches/fixture/manifest.json').read_text())
     assert manifest['seed_base'] == 100 and manifest['seeds'] == [100, 101, 102]
     assert manifest['feedback_level'] == 2
+    assert manifest['model_reload_policy'] == 'per_trial'
+    assert len({r['model'] for r in requests}) == 24
+    assert Path(env['FIXTURE_EVENTS']).read_text().splitlines() == (
+        ['load qwen/qwen3-coder-30b', 'unload qwen/qwen3-coder-30b'] * 12
+        + ['load openai/gpt-oss-20b', 'unload openai/gpt-oss-20b'] * 12)
     rows = json.loads((repo / 'output/batches/fixture/summary.json').read_text())
     assert len(rows) == 24
     for row in rows:
         assert row['seed'] == [100, 101, 102][row['iter']] and row['feedback_level'] == 2
     for model, alias in (('Qwen3-Coder-30B', 'qwen'), ('gpt-oss-20b', 'gptoss')):
         for task in ('37', '44'):
-            runtime = json.loads((repo / f'output/batches/fixture/{alias}-{task}-runtime.json').read_text())
-            assert runtime['context_length'] == 32768
             for pipeline in ('direct', 'modeling'):
                 for i, seed in enumerate((100, 101, 102)):
+                    runtime = json.loads((repo / f'output/batches/fixture/{alias}-{task}-{pipeline}-iter-{i}-runtime.json').read_text())
+                    assert runtime['context_length'] == 32768
                     trial = repo / f'output/{model}/fixture/{task}-vanilla-{pipeline}-iter-{i}'
                     state = json.loads((trial / 'run.json').read_text())
                     assert state['identity']['seed'] == seed and state['identity']['feedback_level'] == 2
                     assert state['settings']['sampling']['seed'] == seed
+                    assert state['settings']['runtime']['identifier'] == runtime['identifier']
+                    assert len([r for r in requests if r['model'] == runtime['identifier']]) == (1 if pipeline == 'direct' else 2)
+
+
+@pytest.mark.parametrize('model', ['Qwen3-Coder-30B', 'gpt-oss-20b'])
+def test_batch_reloads_between_repetitions_but_preserves_instance_inside_modeling_and_repairs(
+        model, batch_repo, endpoint):
+    repo, env = batch_repo
+    replies = [(200, completion(text)) for _ in range(2) for text in (DOMAIN, BAD, GOOD)]
+    with endpoint(replies) as (url, requests):
+        env['LMSTUDIO_API_BASE'] = url
+        result = execute(repo, env, '--models', model, '--projects', '37', '--pipeline', 'modeling',
+                         '--iters', '2', '--max-repairs', '1', '--feedback-level', '1')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(requests) == 6
+    assert [r['seed'] for r in requests] == [42, 42, 42, 43, 43, 43]
+    assert len({r['model'] for r in requests[:3]}) == len({r['model'] for r in requests[3:]}) == 1
+    assert requests[0]['model'] != requests[3]['model']
+    assert section(requests[1]['messages'][0]['content'], 'RepairHistory') == []
+    assert section(requests[4]['messages'][0]['content'], 'RepairHistory') == []
+    for request in (requests[2], requests[5]):
+        assert len(section(request['messages'][0]['content'], 'RepairHistory')) == 1
+    summary = json.loads((repo / 'output/batches/fixture/summary.json').read_text())
+    assert len(summary) == 2 and all(row['status'] == 'passed' for row in summary)
+    assert all(row['repairs_used'] == 1 for row in summary)
+
+
+def test_failure_in_second_repetition_unloads_instance_and_stops_later_trials(batch_repo, endpoint):
+    repo, env = batch_repo
+    with endpoint([(200, completion(CODE)), (400, {'error': {'message': 'second repetition failed'}})]) as (url, requests):
+        env['LMSTUDIO_API_BASE'] = url
+        result = execute(repo, env, '--models', 'gpt-oss-20b', '--projects', '37',
+                         '--pipeline', 'both', '--iters', '3')
+    assert result.returncode != 0 and len(requests) == 2
+    assert requests[0]['model'] != requests[1]['model']
+    assert Path(env['FIXTURE_EVENTS']).read_text().splitlines() == [
+        'load openai/gpt-oss-20b', 'unload openai/gpt-oss-20b'] * 2
+    assert json.loads(Path(env['FIXTURE_MODELS']).read_text()) == []
+    status = json.loads((repo / 'output/batches/fixture/status.json').read_text())
+    assert status['status'] == 'failed'
+    assert status['completed_jobs'] == [
+        {'model': 'gpt-oss-20b', 'task': '37', 'pipeline': 'direct', 'iter': 0, 'seed': 42}]
+    rows = json.loads((repo / 'output/batches/fixture/summary.json').read_text())
+    assert [(r['iter'], r['status']) for r in rows] == [(0, 'passed'), (1, 'api_error')]
+
+
+def test_manual_generator_can_select_one_repetition_without_renumbering_seed_or_output(
+        tiny_benchmark, tmp_path, endpoint, runtime_fixture, monkeypatch):
+    import generate
+    monkeypatch.setattr(generate, 'OUTDIR_BASE', str(tmp_path))
+    monkeypatch.setattr(signal, 'signal', lambda *args: None)
+    argv = ['generate.py', 'gpt-oss-20b', '44', 'vanilla', '3', 'selected',
+            '--iteration-index', '2', '--seed-base', '100', '--max-repairs', '0']
+    with endpoint([(200, completion(GOOD))]) as (url, requests):
+        monkeypatch.setenv('LMSTUDIO_API_BASE', url)
+        monkeypatch.setattr(sys, 'argv', argv)
+        generate.main()
+        generate.main()  # Only the selected finished trial is skipped on a repeated invocation.
+    assert len(requests) == 1 and requests[0]['seed'] == 102
+    parent = tmp_path / 'gpt-oss-20b/selected'
+    assert sorted(p.name for p in parent.iterdir() if p.is_dir()) == ['44-vanilla-direct-iter-2']
+    state = json.loads((parent / '44-vanilla-direct-iter-2/run.json').read_text())
+    assert state['identity']['iter'] == 2 and state['identity']['seed'] == 102
+    assert 'Selected iteration index: 2' in (parent / 'gen.config').read_text()
+
+
+@pytest.mark.parametrize('index', ['-1', '3', 'not-an-index'])
+def test_manual_invalid_iteration_index_fails_before_model_setup(index, monkeypatch, tmp_path):
+    import generate
+    monkeypatch.setattr(generate, 'make_llm', lambda *_: pytest.fail('must reject before loading'))
+    monkeypatch.setattr(generate, 'OUTDIR_BASE', str(tmp_path))
+    monkeypatch.setattr(sys, 'argv', ['generate.py', 'gpt-oss-20b', '44', 'vanilla', '3', 'invalid',
+                                    '--iteration-index', index])
+    with pytest.raises(SystemExit) as error:
+        generate.main()
+    assert error.value.code == 2 and not list(tmp_path.iterdir())
 
 
 def test_default_batch_uses_both_pipelines_three_seeds_and_score_feedback(batch_repo):
