@@ -1,0 +1,37 @@
+"""Core data models for the lottery system."""
+
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+
+@dataclass
+class User:
+    """A participant of the lottery."""
+
+    name: str
+    department: str
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.department})"
+
+
+@dataclass
+class Prize:
+    """A prize to be drawn in one lottery round."""
+
+    name: str
+    quantity: int
+    avoid_groups: List[str] = field(default_factory=list)
+    associated_drawer: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.avoid_groups is None:
+            self.avoid_groups = []
+        else:
+            self.avoid_groups = list(self.avoid_groups)
+
+    def __str__(self) -> str:
+        avoid = ", ".join(self.avoid_groups) if self.avoid_groups else "None"
+        drawer = self.associated_drawer if self.associated_drawer else "None"
+        return (f"{self.name} x{self.quantity} "
+                f"(Avoid Groups: {avoid}; Drawer: {drawer})")

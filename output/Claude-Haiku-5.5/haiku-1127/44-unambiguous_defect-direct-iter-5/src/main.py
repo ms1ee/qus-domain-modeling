@@ -1,0 +1,19 @@
+"""Entry point of the Beijing Subway fare calculation system.
+
+Usage:
+    python src/main.py [--mode MODE] [--max_transfers N] [--line_preference LINE]
+                       [--format text|json] [--output_file PATH] [--check_data]
+"""
+
+import os
+import sys
+
+# Make the modules in this directory importable regardless of the working directory.
+_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+
+from cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())

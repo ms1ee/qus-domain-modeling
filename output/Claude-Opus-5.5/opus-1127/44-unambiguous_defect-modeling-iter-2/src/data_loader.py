@@ -1,0 +1,38 @@
+"""Data loading utilities for the Beijing Subway fare calculation system.
+
+The subway network is stored in ``subway_data.json`` next to this module::
+
+    {"stations": [{"name": str, "lines": [str]}],
+     "connections": [{"source": str, "dest": str,
+                      "distance": int (meters), "line": str}]}
+"""
+
+import json
+import os
+
+# Absolute path of the bundled data file, valid from any working directory.
+DATA_FILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "subway_data.json")
+
+
+def load_subway_data(path=DATA_FILE_PATH):
+    """Load and return the JSON content of the subway data file.
+
+    :param path: path of the JSON file (defaults to ``DATA_FILE_PATH``)
+    :return: dict with the keys ``stations`` and ``connections``
+    :raises FileNotFoundError: if the file does not exist
+    :raises ValueError: if the file is not valid JSON or has a wrong structure
+    """
+    if path is None:
+        path = DATA_FILE_PATH
+    with open(path, "r", encoding="utf-8") as fh:
+        try:
+            data = json.load(fh)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Subway data file '%s' is not valid JSON: %s" % (path, exc)) from exc
+    if not isinstance(data, dict):
+        raise ValueError("Subway data file '%s' must contain a JSON object" % path)
+    data.setdefault("stations", [])
+    data.setdefault("connections", [])
+    if not isinstance(data["stations"], list) or not isinstance(data["connections"], list):
+        raise ValueError("'stations' and 'connections' must be lists in '%s'" % path)
+    return data

@@ -1,0 +1,1563 @@
+<file path="src/config.py">
+"""Configuration constants and optional JSON configuration loading.
+
+All map geometry and default system parameters live here so that every
+other module shares one source of truth.
+"""
+
+import json
+import logging
+import os
+from typing import Any, Dict
+
+logger = logging.getLogger("dispatch.config")
+
+# Map geometry (units).
+MAP_SIZE = 800          # Map is 800x800 units.
+CELL_SIZE = 100         # Each grid cell is 100x100 units.
+GRID_CELLS = 8          # 8x8 cells (64 total).
+
+# Rider defaults.
+RIDER_START_X = 400
+RIDER_START_Y = 400
+RIDER_SPEED = 20        # Units per tick.
+
+# User input bounds (validated on input; values above MAP_SIZE snap to the edge).
+INPUT_MIN = 0
+INPUT_MAX = 1000
+
+# Simulation safety limit when running an order to completion.
+MAX_TICKS_PER_ORDER = 10000
+
+# File names.
+DEFAULT_CONFIG_PATH = "dispatch_config.json"
+DEFAULT_STATE_PATH = "dispatch_state.json"
+
+# Tunable system parameters (overridable via JSON configuration file).
+DEFAULTS: Dict[str, int] = {
+    "initial_funds": 1000,
+    "recruit_min_funds": 300,
+    "recruit_cost": 500,
+    "rider_speed": RIDER_SPEED,
+    "max_ticks_per_order": MAX_TICKS_PER_ORDER,
+}
+
+
+def load_config(path: str = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
+    """Load system parameters from a JSON file, falling back to defaults.
+
+    Unknown keys are ignored. Invalid values produce a warning and keep the
+    default. A missing or unreadable file yields the default parameters.
+
+    Args:
+        path: Path to the JSON configuration file.
+
+    Returns:
+        A dictionary containing every key from ``DEFAULTS``.
+    """
+    params: Dict[str, Any] = dict(DEFAULTS)
+    if not os.path.isfile(path):
+        return params
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Could not read configuration %s: %s", path, exc)
+        return params
+    if not isinstance(data, dict):
+        logger.warning("Configuration %s must contain a JSON object", path)
+        return params
+    for key in DEFAULTS:
+        if key in data:
+            try:
+                params[key] = int(data[key])
+            except (TypeError, ValueError):
+                logger.warning("Invalid value for %s in %s; using default", key, path)
+    return params
+</file>
+<file path="src/globalvar.py">
+"""Process-wide variable store shared by the dispatch simulator modules.
+
+The store holds the system funds, the rider list (key ``"riders"``), the
+rider ID counter, the running flag, the simulated clock, the order list and
+the active configuration.
+"""
+
+from typing import Any, Dict
+
+from config import DEFAULTS
+
+_store: Dict[str, Any] = {}
+
+
+def _init() -> None:
+    """Reset the global store to its default values.
+
+    Sets funds to the configured initial amount, an empty rider list, the
+    rider ID counter to 0, the running flag to True, the clock to 0 and an
+    empty order list.
+    """
+    _store.clear()
+    _store.update({
+        "config": dict(DEFAULTS),
+        "funds": DEFAULTS["initial_funds"],
+        "riders": [],
+        "rider_id_counter": 0,
+        "running": True,
+        "time": 0,
+        "orders": [],
+    })
+
+
+def set_value(key: str, value: Any) -> None:
+    """Store a value under the given key.
+
+    Args:
+        key: Name of the global variable.
+        value: Value to store.
+    """
+    _store[key] = value
+
+
+def get_value(key: str, default: Any = None) -> Any:
+    """Retrieve a global variable.
+
+    Args:
+        key: Name of the global variable.
+        default: Value returned when the key is absent.
+
+    Returns:
+        The stored value, or ``default`` if the key does not exist.
+    """
+    return _store.get(key, default)
+
+
+_init()
+</file>
+<file path="src/path_planner.py">
+"""Grid-based path planning on the 800x800 street map.
+
+Streets are the lines where ``x`` or ``y`` is a multiple of 100. Riders move
+along streets with right-angle turns only. Restaurants and customers sit at
+street intersections (points whose coordinates are both multiples of 100).
+"""
+
+import math
+from typing import List, Tuple
+
+from config import CELL_SIZE, GRID_CELLS, MAP_SIZE
+
+Point = Tuple[int, int]
+
+
+class PathPlanner:
+    """Static helper class implementing street-following pathfinding.
+
+    The planner always stays on streets: when travelling along a horizontal
+    street it only changes ``x``; when travelling along a vertical street it
+    only changes ``y``. At an intersection it prefers horizontal movement
+    first, producing a deterministic right-angle route. Because the route is
+    deterministic and riders never block each other, no deadlock can occur.
+    """
+
+    @staticmethod
+    def snap(value: int) -> int:
+        """Convert a raw coordinate to the top-left corner of its grid cell.
+
+        Values are clamped to [0, MAP_SIZE]. Values at or beyond the map edge
+        map to the edge intersection (800).
+
+        Args:
+            value: Raw coordinate.
+
+        Returns:
+            The snapped coordinate, a multiple of ``CELL_SIZE``.
+        """
+        clamped = max(0, min(int(value), MAP_SIZE))
+        cell = min(clamped // CELL_SIZE, GRID_CELLS)
+        return cell * CELL_SIZE
+
+    @classmethod
+    def snap_point(cls, x: int, y: int) -> Point:
+        """Snap both coordinates of a point to grid corners.
+
+        Args:
+            x: Raw x coordinate.
+            y: Raw y coordinate.
+
+        Returns:
+            Tuple ``(x, y)`` of snapped coordinates.
+        """
+        return cls.snap(x), cls.snap(y)
+
+    @staticmethod
+    def is_street(x: int, y: int) -> bool:
+        """Return True if the point lies on a street (grid line)."""
+        return x % CELL_SIZE == 0 or y % CELL_SIZE == 0
+
+    @staticmethod
+    def is_intersection(x: int, y: int) -> bool:
+        """Return True if the point is a street intersection."""
+        return x % CELL_SIZE == 0 and y % CELL_SIZE == 0
+
+    @staticmethod
+    def manhattan(a: Point, b: Point) -> int:
+        """Return the Manhattan distance between two points."""
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    @staticmethod
+    def euclidean(a: Point, b: Point) -> float:
+        """Return the Euclidean distance between two points."""
+        return math.hypot(a[0] - b[0], a[1] - b[1])
+
+    @staticmethod
+    def next_position(x: int, y: int, tx: int, ty: int, speed: int) -> Point:
+        """Compute the position after one tick of movement toward a target.
+
+        Movement rules:
+          * If the rider is directly above or below the target (same x), it
+            moves only vertically.
+          * If the rider is directly left or right of the target (same y), it
+            moves only horizontally.
+          * If the rider is on a vertical street, it keeps moving vertically.
+          * Otherwise (horizontal street or intersection) it moves horizontally
+            first.
+
+        Args:
+            x: Current x coordinate.
+            y: Current y coordinate.
+            tx: Target x coordinate.
+            ty: Target y coordinate.
+            speed: Maximum distance to move this tick (units).
+
+        Returns:
+            The new ``(x, y)`` position; never overshoots the target.
+
+        Raises:
+            ValueError: If ``speed`` is not positive.
+        """
+        if speed <= 0:
+            raise ValueError("speed must be positive")
+        if x == tx and y == ty:
+            return x, y
+
+        if x == tx:
+            axis = "y"
+        elif y == ty:
+            axis = "x"
+        else:
+            on_vertical = x % CELL_SIZE == 0
+            on_horizontal = y % CELL_SIZE == 0
+            axis = "y" if (on_vertical and not on_horizontal) else "x"
+
+        if axis == "x":
+            delta = tx - x
+            step = min(speed, abs(delta))
+            return (x + step if delta > 0 else x - step), y
+        delta = ty - y
+        step = min(speed, abs(delta))
+        return x, (y + step if delta > 0 else y - step)
+
+    @classmethod
+    def plan_route(cls, start: Point, end: Point) -> List[Point]:
+        """Plan a right-angle street route from ``start`` to ``end``.
+
+        Args:
+            start: Starting point.
+            end: Destination point.
+
+        Returns:
+            List of corner points beginning with ``start`` and ending with
+            ``end``. A route with no movement returns ``[start]``.
+        """
+        points: List[Point] = [start]
+        x, y = start
+        guard = 0
+        while (x, y) != end and guard < 4:
+            x, y = cls.next_position(x, y, end[0], end[1], MAP_SIZE * 2)
+            points.append((x, y))
+            guard += 1
+        return points
+
+    @classmethod
+    def plan_trip(cls, rider_pos: Point, restaurant: Point, customer: Point) -> List[Point]:
+        """Plan a continuous route: rider -> restaurant -> customer.
+
+        This is the multi-destination path used for the route map. The two
+        legs are joined without duplicating the restaurant point.
+
+        Args:
+            rider_pos: Current rider position.
+            restaurant: Restaurant grid point.
+            customer: Customer grid point.
+
+        Returns:
+            Ordered list of corner points for the whole trip.
+        """
+        to_restaurant = cls.plan_route(rider_pos, restaurant)
+        to_customer = cls.plan_route(restaurant, customer)
+        return to_restaurant + to_customer[1:]
+
+    @staticmethod
+    def route_length(points: List[Point]) -> int:
+        """Return the total street length of a route of corner points."""
+        total = 0
+        for (ax, ay), (bx, by) in zip(points, points[1:]):
+            total += abs(ax - bx) + abs(ay - by)
+        return total
+
+    @staticmethod
+    def estimate_ticks(distance: int, speed: int) -> int:
+        """Estimate the number of ticks needed to cover a distance.
+
+        Args:
+            distance: Route length in units.
+            speed: Speed in units per tick (must be positive).
+
+        Returns:
+            Ceiling of ``distance / speed``; 0 for zero distance.
+        """
+        if speed <= 0:
+            raise ValueError("speed must be positive")
+        if distance <= 0:
+            return 0
+        return (distance + speed - 1) // speed
+</file>
+<file path="src/rider.py">
+"""Rider model: state machine, street-based movement and event logging."""
+
+import logging
+from typing import Any, Dict, List, Optional, Tuple
+
+import globalvar
+from config import RIDER_SPEED, RIDER_START_X, RIDER_START_Y
+from path_planner import PathPlanner
+
+logger = logging.getLogger("dispatch.rider")
+
+# Rider state enumeration.
+IDLE = 0
+PICKING_UP = 1
+DELIVERING = 2
+
+STATE_NAMES = {IDLE: "idle", PICKING_UP: "picking up", DELIVERING: "delivering"}
+
+# Order statuses that have not been accepted by a rider yet.
+_NOT_STARTED = ("created", "assigned")
+
+
+def _configured_speed() -> int:
+    """Return the rider speed from the active configuration."""
+    cfg = globalvar.get_value("config") or {}
+    try:
+        return int(cfg.get("rider_speed", RIDER_SPEED))
+    except (TypeError, ValueError):
+        return RIDER_SPEED
+
+
+class Rider:
+    """A delivery rider that moves on the street grid and serves orders.
+
+    Orders are assigned by appending them to ``rider.orders``. Orders are
+    served in assignment order. Completed orders remain in ``orders`` as
+    delivery history.
+
+    Attributes:
+        rider_id: Unique integer identifier.
+        x: Current x coordinate (0-800).
+        y: Current y coordinate (0-800).
+        speed: Movement speed in units per tick.
+        state: 0 idle, 1 picking up, 2 delivering.
+        orders: All orders ever assigned to this rider.
+        special_case: True while moving in a straight line toward the target
+            (directly above/below or left/right of it).
+        log: Chronological list of event dictionaries. Each contains the keys
+            ``"event"`` and ``"order_id"`` plus ``"time"``, ``"rider_id"``,
+            ``"x"``, ``"y"`` and ``"state"``.
+    """
+
+    def __init__(self, rider_id: int) -> None:
+        """Create a rider at the default start position (400, 400).
+
+        Args:
+            rider_id: Unique identifier assigned by the system.
+        """
+        self.rider_id: int = int(rider_id)
+        self.x: int = RIDER_START_X
+        self.y: int = RIDER_START_Y
+        self.speed: int = _configured_speed()
+        self.state: int = IDLE
+        self.orders: List[Any] = []
+        self.special_case: bool = False
+        self.log: List[Dict[str, Any]] = []
+        self._record("spawn", None)
+
+    @property
+    def position(self) -> Tuple[int, int]:
+        """Return the current ``(x, y)`` position."""
+        return self.x, self.y
+
+    def active_orders(self) -> List[Any]:
+        """Return orders that are not yet completed, in service order."""
+        return [order for order in self.orders if order.status != "completed"]
+
+    def current_order(self) -> Optional[Any]:
+        """Return the order currently being served, or None if idle."""
+        active = self.active_orders()
+        return active[0] if active else None
+
+    def is_idle(self) -> bool:
+        """Return True if the rider has no active orders."""
+        return not self.active_orders()
+
+    def move(self) -> None:
+        """Advance the rider by one tick.
+
+        Handles state transitions:
+          * Idle -> Picking up when a new order is accepted.
+          * Picking up -> Delivering on arrival at the restaurant.
+          * Delivering -> Picking up (next order) or Idle on delivery.
+        """
+        current = self.current_order()
+        if current is None:
+            if self.state != IDLE or self.special_case:
+                self.state = IDLE
+                self.special_case = False
+            return
+
+        if current.status in _NOT_STARTED:
+            current.status = "picking_up"
+            self.state = PICKING_UP
+            self._record("accepted_order", current.id)
+
+        if current.status == "delivering":
+            self.state = DELIVERING
+        else:
+            self.state = PICKING_UP
+
+        if self.state == PICKING_UP:
+            if self._advance(current.res_pos):
+                current.status = "delivering"
+                self.state = DELIVERING
+                self._record("arrived_at_merchant", current.id)
+        else:
+            if self._advance(current.cus_pos):
+                current.complete(globalvar.get_value("time", 0))
+                self._record("delivered_to_customer", current.id)
+                self.state = PICKING_UP if self.current_order() is not None else IDLE
+                self.special_case = False
+
+    def _advance(self, target: Tuple[int, int]) -> bool:
+        """Move up to ``speed`` units toward ``target`` along streets.
+
+        Args:
+            target: Destination grid point.
+
+        Returns:
+            True if the rider is located at the target after moving.
+        """
+        tx, ty = target
+        self.x, self.y = PathPlanner.next_position(self.x, self.y, tx, ty, self.speed)
+        self.special_case = (self.x == tx) != (self.y == ty)
+        return (self.x, self.y) == (tx, ty)
+
+    def _record(self, event: str, order_id: Optional[int]) -> None:
+        """Append an entry to the rider's event log.
+
+        Args:
+            event: Event name (spawn, accepted_order, arrived_at_merchant,
+                delivered_to_customer).
+            order_id: Related order identifier, or None.
+        """
+        entry = {
+            "event": event,
+            "order_id": order_id,
+            "time": globalvar.get_value("time", 0),
+            "rider_id": self.rider_id,
+            "x": self.x,
+            "y": self.y,
+            "state": self.state,
+        }
+        self.log.append(entry)
+        logger.debug("Rider %s: %s (order %s)", self.rider_id, event, order_id)
+
+    def __repr__(self) -> str:
+        return (f"Rider(id={self.rider_id}, pos=({self.x}, {self.y}), "
+                f"state={STATE_NAMES[self.state]}, active={len(self.active_orders())})")
+</file>
+<file path="src/order_model.py">
+"""Order data model."""
+
+import itertools
+from typing import Any, Dict, Optional, Sequence
+
+import globalvar
+from path_planner import PathPlanner
+
+_id_counter = itertools.count(1)
+
+
+class Order:
+    """A food delivery order from a restaurant to a customer.
+
+    Attributes:
+        id: Unique order identifier.
+        res_pos: Restaurant grid point ``(x, y)`` (snapped to cell corners).
+        cus_pos: Customer grid point ``(x, y)`` (snapped to cell corners).
+        status: One of ``"created"``, ``"assigned"``, ``"picking_up"``,
+            ``"delivering"``, ``"completed"``.
+        rider_id: ID of the assigned rider, or None.
+        start_time: Simulated tick when the order was created.
+        complete_time: Simulated tick when delivery finished, or None.
+        distance: Manhattan distance from restaurant to customer (units).
+    """
+
+    def __init__(self, res_pos: Sequence[int], cus_pos: Sequence[int]) -> None:
+        """Create an order and snap its coordinates to grid corners.
+
+        Args:
+            res_pos: Restaurant coordinates ``(x, y)``.
+            cus_pos: Customer coordinates ``(x, y)``.
+        """
+        self.id: int = next(_id_counter)
+        rx, ry = res_pos
+        cx, cy = cus_pos
+        self.res_pos: tuple = PathPlanner.snap_point(int(rx), int(ry))
+        self.cus_pos: tuple = PathPlanner.snap_point(int(cx), int(cy))
+        self.status: str = "created"
+        self.rider_id: Optional[int] = None
+        self.start_time: int = globalvar.get_value("time", 0)
+        self.complete_time: Optional[int] = None
+        self.distance: int = PathPlanner.manhattan(self.res_pos, self.cus_pos)
+
+    def assign_to(self, rider_id: int) -> None:
+        """Record the assigned rider and mark the order as assigned.
+
+        Args:
+            rider_id: Identifier of the rider receiving the order.
+        """
+        self.rider_id = int(rider_id)
+        if self.status == "created":
+            self.status = "assigned"
+
+    def complete(self, time: int) -> None:
+        """Mark the order as delivered.
+
+        Args:
+            time: Simulated tick of completion.
+        """
+        self.status = "completed"
+        self.complete_time = time
+
+    @property
+    def time_taken(self) -> Optional[int]:
+        """Ticks from creation to completion, or None if not completed."""
+        if self.complete_time is None:
+            return None
+        return self.complete_time - self.start_time
+
+    @property
+    def efficiency(self) -> Optional[float]:
+        """Delivery efficiency: distance units per tick, or None."""
+        taken = self.time_taken
+        if not taken:
+            return None
+        return self.distance / taken
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a JSON-serialisable representation of the order."""
+        return {
+            "id": self.id,
+            "res_pos": list(self.res_pos),
+            "cus_pos": list(self.cus_pos),
+            "status": self.status,
+            "rider_id": self.rider_id,
+            "start_time": self.start_time,
+            "complete_time": self.complete_time,
+            "distance": self.distance,
+            "time_taken": self.time_taken,
+            "efficiency": self.efficiency,
+        }
+
+    def __repr__(self) -> str:
+        return f"Order(id={self.id}, status={self.status}, rider={self.rider_id})"
+</file>
+<file path="src/order.py">
+"""Order management: creation, validation, and rider assignment."""
+
+import logging
+from typing import List, Optional
+
+import globalvar
+from config import INPUT_MAX, INPUT_MIN
+from order_model import Order
+from path_planner import PathPlanner
+from rider import Rider
+
+logger = logging.getLogger("dispatch.order")
+
+
+def find_best_rider_for_order(order: Order) -> Optional[Rider]:
+    """Select the best rider for an order.
+
+    Selection rule:
+      1. Fewest current active orders (the assignment always goes to the
+         least-loaded rider).
+      2. Ties are broken by the Euclidean distance
+         ``sqrt((rider_x - restaurant_x)^2 + (rider_y - restaurant_y)^2)``,
+         so the closest rider wins.
+
+    Args:
+        order: The order needing a rider.
+
+    Returns:
+        The chosen rider, or None if no riders exist.
+    """
+    riders = globalvar.get_value("riders") or []
+    if not riders:
+        return None
+
+    def sort_key(rider: Rider):
+        distance = PathPlanner.euclidean(rider.position, order.res_pos)
+        return len(rider.active_orders()), distance
+
+    return min(riders, key=sort_key)
+
+
+class OrderManager:
+    """Creates, tracks and assigns orders."""
+
+    @staticmethod
+    def validate_coordinate(value: int) -> int:
+        """Validate a single input coordinate.
+
+        Args:
+            value: Integer coordinate.
+
+        Returns:
+            The validated coordinate.
+
+        Raises:
+            ValueError: If the value is not an int or is out of range.
+        """
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("coordinates must be integers")
+        if value < INPUT_MIN or value > INPUT_MAX:
+            raise ValueError(f"coordinate {value} is outside {INPUT_MIN}-{INPUT_MAX}")
+        return value
+
+    def create_order(self, res_x: int, res_y: int, cus_x: int, cus_y: int) -> Order:
+        """Validate coordinates, create an order and register it.
+
+        Args:
+            res_x: Restaurant x coordinate.
+            res_y: Restaurant y coordinate.
+            cus_x: Customer x coordinate.
+            cus_y: Customer y coordinate.
+
+        Returns:
+            The newly created order (status ``"created"``).
+
+        Raises:
+            ValueError: If any coordinate is invalid.
+        """
+        values = [self.validate_coordinate(v) for v in (res_x, res_y, cus_x, cus_y)]
+        order = Order((values[0], values[1]), (values[2], values[3]))
+        globalvar.get_value("orders").append(order)
+        logger.info("Created order %s", order.id)
+        return order
+
+    @staticmethod
+    def list_orders() -> List[Order]:
+        """Return all orders ever created, oldest first."""
+        return list(globalvar.get_value("orders") or [])
+
+    def pending_orders(self) -> List[Order]:
+        """Return orders that have not been assigned to a rider yet."""
+        return [o for o in self.list_orders() if o.status == "created"]
+
+    def assign_order(self, order: Order) -> Optional[Rider]:
+        """Assign an order to the best rider.
+
+        The order is recorded on the rider by appending it to ``rider.orders``
+        and calling ``order.assign_to``. The rider accepts it on its next tick.
+
+        Args:
+            order: The order to assign.
+
+        Returns:
+            The rider the order was assigned to, or None if no rider exists.
+        """
+        rider = find_best_rider_for_order(order)
+        if rider is None:
+            logger.warning("No rider available for order %s", order.id)
+            return None
+        order.assign_to(rider.rider_id)
+        rider.orders.append(order)
+        logger.info("Order %s assigned to rider %s", order.id, rider.rider_id)
+        return rider
+</file>
+<file path="src/system.py">
+"""System-level resource management and simulation control."""
+
+import json
+import logging
+from typing import Any, Dict, List, Optional, Tuple
+
+import globalvar
+from config import DEFAULTS, MAX_TICKS_PER_ORDER
+from order import OrderManager
+from order_model import Order
+from rider import IDLE, PICKING_UP, Rider
+
+logger = logging.getLogger("dispatch.system")
+
+
+def init_system(params: Optional[Dict[str, Any]] = None) -> None:
+    """Initialise the global system state.
+
+    Sets funds to the initial amount, an empty rider list, the rider ID
+    counter to 0, the running flag to True, the simulated clock to 0 and an
+    empty order list.
+
+    Args:
+        params: Optional overrides for ``DEFAULTS`` (e.g. loaded from a
+            configuration file).
+    """
+    globalvar._init()
+    cfg = dict(DEFAULTS)
+    if params:
+        cfg.update(params)
+    globalvar.set_value("config", cfg)
+    globalvar.set_value("funds", int(cfg["initial_funds"]))
+    globalvar.set_value("riders", [])
+    globalvar.set_value("rider_id_counter", 0)
+    globalvar.set_value("running", True)
+    globalvar.set_value("time", 0)
+    globalvar.set_value("orders", [])
+    logger.info("System initialised with funds=%s", cfg["initial_funds"])
+
+
+class SystemManager:
+    """Coordinates funds, riders, orders and the simulation clock."""
+
+    def __init__(self, params: Optional[Dict[str, Any]] = None) -> None:
+        """Initialise the system state and order manager.
+
+        Args:
+            params: Optional configuration overrides.
+        """
+        init_system(params)
+        self.order_manager = OrderManager()
+
+    # ------------------------------------------------------------------ funds
+    def _cfg(self, key: str) -> int:
+        """Return a configured integer parameter."""
+        return int(globalvar.get_value("config")[key])
+
+    def get_funds(self) -> int:
+        """Return the current system fund balance."""
+        return int(globalvar.get_value("funds"))
+
+    def adjust_funds(self, delta: int) -> int:
+        """Add ``delta`` (possibly negative) to the fund balance.
+
+        Args:
+            delta: Amount to add.
+
+        Returns:
+            The new balance.
+        """
+        new_value = self.get_funds() + int(delta)
+        globalvar.set_value("funds", new_value)
+        return new_value
+
+    # ----------------------------------------------------------------- riders
+    @staticmethod
+    def riders() -> List[Rider]:
+        """Return the live rider list."""
+        return globalvar.get_value("riders")
+
+    def next_rider_id(self) -> int:
+        """Return a new unique rider ID and advance the counter."""
+        counter = int(globalvar.get_value("rider_id_counter")) + 1
+        globalvar.set_value("rider_id_counter", counter)
+        return counter
+
+    def create_rider(self) -> Rider:
+        """Recruit a new rider, deducting the recruitment cost.
+
+        Returns:
+            The newly created rider.
+        """
+        rider = Rider(self.next_rider_id())
+        self.riders().append(rider)
+        self.adjust_funds(-self._cfg("recruit_cost"))
+        logger.info("Recruited rider %s", rider.rider_id)
+        return rider
+
+    def idle_rider_count(self) -> int:
+        """Return the number of riders with no active orders."""
+        return sum(1 for rider in self.riders() if rider.is_idle())
+
+    def pending_order_count(self) -> int:
+        """Return the number of orders waiting for a rider."""
+        return len(self.order_manager.pending_orders())
+
+    def maybe_recruit(self) -> List[Rider]:
+        """Recruit riders while pending orders exceed idle riders.
+
+        Recruitment requires funds of at least ``recruit_min_funds``. Each
+        recruit costs ``recruit_cost``.
+
+        Returns:
+            List of riders created during this call (possibly empty).
+        """
+        created: List[Rider] = []
+        min_funds = self._cfg("recruit_min_funds")
+        while (self.pending_order_count() > self.idle_rider_count()
+               and self.get_funds() >= min_funds):
+            created.append(self.create_rider())
+        return created
+
+    # ----------------------------------------------------------------- orders
+    def submit_order(self, res_x: int, res_y: int, cus_x: int,
+                     cus_y: int) -> Tuple[Order, Optional[Rider], List[Rider]]:
+        """Create an order, recruit riders if needed, and assign the order.
+
+        Args:
+            res_x: Restaurant x coordinate.
+            res_y: Restaurant y coordinate.
+            cus_x: Customer x coordinate.
+            cus_y: Customer y coordinate.
+
+        Returns:
+            Tuple ``(order, assigned_rider_or_None, recruited_riders)``.
+        """
+        order = self.order_manager.create_order(res_x, res_y, cus_x, cus_y)
+        recruited = self.maybe_recruit()
+        rider = self.order_manager.assign_order(order)
+        return order, rider, recruited
+
+    def all_orders(self) -> List[Order]:
+        """Return all orders (completed and active)."""
+        return self.order_manager.list_orders()
+
+    # ------------------------------------------------------------- simulation
+    @staticmethod
+    def current_time() -> int:
+        """Return the simulated clock value (ticks)."""
+        return int(globalvar.get_value("time", 0))
+
+    def tick(self) -> None:
+        """Advance the simulation by one tick and move every rider."""
+        globalvar.set_value("time", self.current_time() + 1)
+        for rider in list(self.riders()):
+            rider.move()
+
+    def run_until_complete(self, order: Order,
+                           max_ticks: Optional[int] = None) -> int:
+        """Run ticks until the given order is completed.
+
+        Args:
+            order: Order to wait for. It must already be assigned.
+            max_ticks: Safety limit on ticks.
+
+        Returns:
+            Number of ticks elapsed.
+
+        Raises:
+            ValueError: If the order has not been assigned to a rider.
+            RuntimeError: If the order does not complete within the limit.
+        """
+        if order.rider_id is None:
+            raise ValueError(f"order {order.id} is not assigned to a rider")
+        limit = max_ticks if max_ticks is not None else self._cfg("max_ticks_per_order")
+        if limit <= 0:
+            limit = MAX_TICKS_PER_ORDER
+        elapsed = 0
+        while order.status != "completed":
+            if elapsed >= limit:
+                raise RuntimeError(f"order {order.id} not completed after {limit} ticks")
+            self.tick()
+            elapsed += 1
+        return elapsed
+
+    def stop(self) -> None:
+        """Clear the running flag so the main loop exits."""
+        globalvar.set_value("running", False)
+
+    def check_consistency(self) -> List[str]:
+        """Verify and automatically repair rider state consistency.
+
+        Riders with active orders are forced into a non-idle state, and riders
+        without active orders are forced to idle.
+
+        Returns:
+            Human-readable descriptions of repairs performed or problems found.
+        """
+        fixes: List[str] = []
+        riders = self.riders()
+        ids = [rider.rider_id for rider in riders]
+        if len(ids) != len(set(ids)):
+            fixes.append("duplicate rider IDs detected (cannot auto-fix)")
+        for rider in riders:
+            has_active = bool(rider.active_orders())
+            if has_active and rider.state == IDLE:
+                rider.state = PICKING_UP
+                fixes.append(f"rider #{rider.rider_id}: idle with active orders -> picking up")
+            elif not has_active and rider.state != IDLE:
+                rider.state = IDLE
+                rider.special_case = False
+                fixes.append(f"rider #{rider.rider_id}: no active orders -> idle")
+        known = set(ids)
+        for order in self.all_orders():
+            if (order.status != "completed" and order.rider_id is not None
+                    and order.rider_id not in known):
+                fixes.append(f"order #{order.id}: rider #{order.rider_id} missing (cannot auto-fix)")
+        return fixes
+
+    # ------------------------------------------------------------ persistence
+    def save_state(self, path: str) -> str:
+        """Write funds, riders, orders and configuration to a JSON file.
+
+        Args:
+            path: Destination file path.
+
+        Returns:
+            The path written.
+
+        Raises:
+            OSError: If the file cannot be written.
+        """
+        data = {
+            "config": globalvar.get_value("config"),
+            "funds": self.get_funds(),
+            "rider_id_counter": globalvar.get_value("rider_id_counter"),
+            "time": self.current_time(),
+            "riders": [
+                {
+                    "rider_id": r.rider_id,
+                    "x": r.x,
+                    "y": r.y,
+                    "speed": r.speed,
+                    "state": r.state,
+                    "special_case": r.special_case,
+                    "order_ids": [o.id for o in r.orders],
+                    "log": r.log,
+                }
+                for r in self.riders()
+            ],
+            "orders": [o.to_dict() for o in self.all_orders()],
+        }
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+        logger.info("State saved to %s", path)
+        return path
+</file>
+<file path="src/display_manager.py">
+"""Status displays and ASCII map rendering for the command line."""
+
+from typing import Iterable, List, Optional, Sequence, Tuple
+
+from config import CELL_SIZE, MAP_SIZE
+from rider import STATE_NAMES, Rider
+
+Point = Tuple[int, int]
+
+
+class DisplayManager:
+    """Formats status, order, rider-log and map output as text.
+
+    The ASCII map samples the 800x800 world every 50 units, giving a
+    17x17 character canvas (8x8 cells with street intersections on even
+    positions). Symbols:
+      ``R`` rider, ``S`` restaurant, ``C`` customer, ``#`` street,
+      ``*`` route, ``.`` empty space.
+    """
+
+    SAMPLE = CELL_SIZE // 2
+    SIZE = MAP_SIZE // SAMPLE + 1
+
+    ROAD = "#"
+    EMPTY = "."
+    ROUTE = "*"
+    RESTAURANT = "S"
+    CUSTOMER = "C"
+    RIDER = "R"
+
+    def _cell_index(self, value: int) -> int:
+        """Convert a world coordinate to a canvas index."""
+        index = int(round(value / self.SAMPLE))
+        return max(0, min(index, self.SIZE - 1))
+
+    def _put(self, grid: List[List[str]], x: int, y: int, symbol: str) -> None:
+        """Place a symbol at the canvas cell corresponding to ``(x, y)``."""
+        grid[self._cell_index(y)][self._cell_index(x)] = symbol
+
+    def _draw_route(self, grid: List[List[str]], points: Sequence[Point]) -> None:
+        """Draw connected line segments for a route on the canvas."""
+        for (ax, ay), (bx, by) in zip(points, points[1:]):
+            if ax == bx:
+                step = self.SAMPLE if by >= ay else -self.SAMPLE
+                for y in range(ay, by + step, step):
+                    self._put(grid, ax, y, self.ROUTE)
+            elif ay == by:
+                step = self.SAMPLE if bx >= ax else -self.SAMPLE
+                for x in range(ax, bx + step, step):
+                    self._put(grid, x, ay, self.ROUTE)
+            else:
+                self._put(grid, ax, ay, self.ROUTE)
+                self._put(grid, bx, by, self.ROUTE)
+        if points:
+            self._put(grid, points[0][0], points[0][1], self.ROUTE)
+            self._put(grid, points[-1][0], points[-1][1], self.ROUTE)
+
+    def render_map(self, riders: Iterable[Rider], orders: Iterable = (),
+                   route: Optional[Sequence[Point]] = None) -> str:
+        """Render the ASCII map with riders, orders and an optional route.
+
+        Args:
+            riders: Riders to display as ``R``.
+            orders: Orders whose restaurant (``S``) and customer (``C``)
+                points are shown.
+            route: Optional list of corner points drawn as ``*`` segments.
+
+        Returns:
+            Multi-line string containing the map and a legend.
+        """
+        grid = [[self.EMPTY] * self.SIZE for _ in range(self.SIZE)]
+        for row in range(self.SIZE):
+            for col in range(self.SIZE):
+                x = col * self.SAMPLE
+                y = row * self.SAMPLE
+                if x % CELL_SIZE == 0 or y % CELL_SIZE == 0:
+                    grid[row][col] = self.ROAD
+        if route:
+            self._draw_route(grid, list(route))
+        for order in orders:
+            self._put(grid, order.res_pos[0], order.res_pos[1], self.RESTAURANT)
+            self._put(grid, order.cus_pos[0], order.cus_pos[1], self.CUSTOMER)
+        for rider in riders:
+            self._put(grid, rider.x, rider.y, self.RIDER)
+
+        header = "      " + "".join(
+            "|" if (col * self.SAMPLE) % CELL_SIZE == 0 else " "
+            for col in range(self.SIZE))
+        lines = ["Map (800x800 units, 100-unit cells; y grows downward)", header]
+        for row in range(self.SIZE):
+            y = row * self.SAMPLE
+            label = f"{y:>4} -" if y % CELL_SIZE == 0 else "     "
+            lines.append(label + "".join(grid[row]))
+        lines.append("Legend: R=rider S=restaurant C=customer #=street "
+                     "*=route .=empty")
+        return "\n".join(lines)
+
+    def format_status(self, funds: int, riders: Sequence[Rider], now: int = 0) -> str:
+        """Format a snapshot of funds and every rider.
+
+        Args:
+            funds: Current system funds.
+            riders: All riders.
+            now: Current simulated tick.
+
+        Returns:
+            Multi-line status text.
+        """
+        lines = [
+            "=== System Status ===",
+            f"Time: {now} tick(s)",
+            f"System funds: {funds}",
+            f"Riders: {len(riders)}",
+        ]
+        for rider in riders:
+            active = rider.active_orders()
+            order_ids = [o.id for o in rider.orders]
+            lines.append(
+                f"  Rider #{rider.rider_id}: position=({rider.x}, {rider.y}) "
+                f"speed={rider.speed} state={STATE_NAMES[rider.state]} "
+                f"active_orders={len(active)} total_orders={len(rider.orders)} "
+                f"order_ids={order_ids}")
+        if not riders:
+            lines.append("  (no riders recruited yet)")
+        return "\n".join(lines)
+
+    def format_orders(self, orders: Sequence) -> str:
+        """Format a table of all orders.
+
+        Args:
+            orders: Orders to display.
+
+        Returns:
+            Multi-line table text.
+        """
+        if not orders:
+            return "No orders yet."
+        header = (f"{'ID':>4} {'Start':>6} {'Restaurant':>12} {'Customer':>12} "
+                  f"{'Distance':>9} {'Time':>6} {'Rider':>6} {'Status':<11}")
+        lines = ["=== Orders ===", header, "-" * len(header)]
+        for o in orders:
+            taken = o.time_taken
+            rider = f"#{o.rider_id}" if o.rider_id is not None else "-"
+            lines.append(
+                f"{o.id:>4} {o.start_time:>6} {str(o.res_pos):>12} "
+                f"{str(o.cus_pos):>12} {o.distance:>9} "
+                f"{(str(taken) if taken is not None else '-'):>6} "
+                f"{rider:>6} {o.status:<11}")
+        return "\n".join(lines)
+
+    def format_rider_log(self, riders: Sequence[Rider]) -> str:
+        """Format every recorded status change for all riders.
+
+        Args:
+            riders: Riders whose logs should be shown.
+
+        Returns:
+            Multi-line log text.
+        """
+        if not riders:
+            return "No riders recruited yet."
+        lines = ["=== Rider Status Log ==="]
+        for rider in riders:
+            lines.append(f"Rider #{rider.rider_id}:")
+            for entry in rider.log:
+                order = entry["order_id"] if entry["order_id"] is not None else "-"
+                lines.append(
+                    f"  t={entry['time']:>5}  {entry['event']:<22} "
+                    f"order={order:<5} pos=({entry['x']}, {entry['y']}) "
+                    f"state={STATE_NAMES[entry['state']]}")
+        return "\n".join(lines)
+
+    def format_order_report(self, order, rider: Rider, start_pos: Point,
+                            route_distance: int, estimated_ticks: int,
+                            actual_ticks: int, recruited: bool) -> str:
+        """Format the summary shown after the ``start`` command.
+
+        Args:
+            order: The processed order.
+            rider: The assigned rider.
+            start_pos: Rider position when the order was assigned.
+            route_distance: Total route length in units.
+            estimated_ticks: Estimated ticks based on rider speed.
+            actual_ticks: Ticks actually elapsed until delivery.
+            recruited: Whether a new rider was added for this order.
+
+        Returns:
+            Multi-line report text.
+        """
+        return "\n".join([
+            f"Order #{order.id} assigned to Rider #{rider.rider_id}",
+            f"Restaurant grid coordinates: {order.res_pos}",
+            f"Customer grid coordinates:   {order.cus_pos}",
+            f"New rider added: {'yes' if recruited else 'no'}",
+            f"Rider speed: {rider.speed} units/tick (started from {start_pos})",
+            f"Route distance: {route_distance} units",
+            f"Estimated time: {estimated_ticks} tick(s); actual: {actual_ticks} tick(s)",
+            f"Order status: {order.status}",
+        ])
+
+    @staticmethod
+    def format_help() -> str:
+        """Return the command reference text."""
+        return "\n".join([
+            "Commands (shortcut in brackets):",
+            "  start [rx ry cx cy]  (s)  Create an order: restaurant then customer coordinates (0-1000)",
+            "  status               (st) Show funds and rider snapshot",
+            "  orders               (o)  Show all order details",
+            "  riders               (r)  Show every rider status change",
+            "  map                  (m)  Show the ASCII map with riders and active orders",
+            "  tick [n]             (t)  Advance the simulation by n ticks (default 1)",
+            "  save [path]               Save state to JSON (default dispatch_state.json)",
+            "  history                   Show command history",
+            "  !! / !n                   Repeat the last command / history entry n",
+            "  help                 (h)  Show this help",
+            "  quit / exit          (q)  Exit the program",
+        ])
+</file>
+<file path="src/input_manager.py">
+"""Command-line parsing, validation and history management."""
+
+from typing import Callable, List, Tuple
+
+from config import INPUT_MAX, INPUT_MIN
+
+
+class CommandError(ValueError):
+    """Raised when user input cannot be parsed or validated."""
+
+
+COMMAND_ALIASES = {
+    "s": "start",
+    "st": "status",
+    "o": "orders",
+    "r": "riders",
+    "m": "map",
+    "t": "tick",
+    "h": "help",
+    "?": "help",
+    "q": "quit",
+    "x": "exit",
+    "hist": "history",
+}
+
+KNOWN_COMMANDS = {
+    "start", "status", "orders", "riders", "map", "tick",
+    "save", "history", "help", "quit", "exit",
+}
+
+COORD_LABELS = ("restaurant x", "restaurant y", "customer x", "customer y")
+MAX_TICK_REQUEST = 10000
+HISTORY_LIMIT = 50
+
+
+class InputManager:
+    """Reads, parses and validates user commands.
+
+    Attributes:
+        history: Previously entered command lines (most recent last).
+    """
+
+    PROMPT = "dispatch> "
+
+    def __init__(self, reader: Callable[[str], str] = input,
+                 writer: Callable[[str], None] = print) -> None:
+        """Create the manager.
+
+        Args:
+            reader: Function used to read a line (defaults to ``input``).
+            writer: Function used to output text (defaults to ``print``).
+        """
+        self._reader = reader
+        self._writer = writer
+        self.history: List[str] = []
+
+    def read_line(self, prompt: str = PROMPT) -> str:
+        """Read one raw line from the user."""
+        return self._reader(prompt)
+
+    def read_command(self) -> Tuple[str, List[str]]:
+        """Read and parse one command line.
+
+        Returns:
+            Tuple ``(command_name, arguments)``. An empty line returns
+            ``("", [])``.
+
+        Raises:
+            CommandError: On unknown commands or invalid shortcuts.
+        """
+        return self.parse_line(self.read_line())
+
+    def parse_line(self, line: str) -> Tuple[str, List[str]]:
+        """Parse a command line, resolving aliases and history shortcuts.
+
+        Args:
+            line: Raw input text.
+
+        Returns:
+            Tuple ``(command_name, arguments)``.
+
+        Raises:
+            CommandError: If the command is unknown or a history reference
+                is invalid.
+        """
+        stripped = line.strip()
+        if not stripped:
+            return "", []
+        if stripped == "!!":
+            if not self.history:
+                raise CommandError("no previous command in history")
+            stripped = self.history[-1]
+        elif stripped.startswith("!"):
+            index_text = stripped[1:]
+            if not index_text.isdigit():
+                raise CommandError(f"invalid history reference '{stripped}'")
+            index = int(index_text)
+            if index < 1 or index > len(self.history):
+                raise CommandError(f"history entry {index} does not exist")
+            stripped = self.history[index - 1]
+
+        tokens = stripped.split()
+        token = tokens[0].lower()
+        name = COMMAND_ALIASES.get(token, token)
+        if name not in KNOWN_COMMANDS:
+            raise CommandError(f"unknown command '{tokens[0]}'. Type 'help' for commands")
+        self.history.append(stripped)
+        if len(self.history) > HISTORY_LIMIT:
+            del self.history[0]
+        return name, tokens[1:]
+
+    @staticmethod
+    def validate_coordinate(value: int, label: str = "coordinate") -> int:
+        """Validate that a coordinate is within the accepted input range.
+
+        Args:
+            value: Parsed integer.
+            label: Name used in error messages.
+
+        Returns:
+            The validated value.
+
+        Raises:
+            CommandError: If the value is outside 0-1000.
+        """
+        if value < INPUT_MIN or value > INPUT_MAX:
+            raise CommandError(
+                f"{label} {value} is out of range ({INPUT_MIN}-{INPUT_MAX})")
+        return value
+
+    def parse_coordinates(self, tokens: List[str]) -> List[int]:
+        """Parse exactly four integer coordinates.
+
+        Args:
+            tokens: Textual tokens: restaurant x, restaurant y, customer x,
+                customer y.
+
+        Returns:
+            List of four validated integers.
+
+        Raises:
+            CommandError: If the count or the types/ranges are invalid.
+        """
+        if len(tokens) != 4:
+            raise CommandError(
+                "expected 4 integers: restaurant_x restaurant_y customer_x customer_y")
+        values: List[int] = []
+        for label, token in zip(COORD_LABELS, tokens):
+            try:
+                number = int(token)
+            except ValueError:
+                raise CommandError(f"{label} '{token}' is not an integer") from None
+            values.append(self.validate_coordinate(number, label))
+        return values
+
+    def prompt_order(self) -> List[int]:
+        """Interactively ask for the four order coordinates.
+
+        Invalid entries are reported and the prompt repeats.
+
+        Returns:
+            List of four validated integers.
+        """
+        values: List[int] = []
+        for label in COORD_LABELS:
+            while True:
+                raw = self.read_line(f"{label} ({INPUT_MIN}-{INPUT_MAX}): ")
+                try:
+                    number = int(raw.strip())
+                    values.append(self.validate_coordinate(number, label))
+                    break
+                except ValueError as exc:
+                    self._writer(f"Invalid input: {exc}. Please try again.")
+        return values
+
+    @staticmethod
+    def parse_tick_count(tokens: List[str]) -> int:
+        """Parse the optional tick count argument of the ``tick`` command.
+
+        Args:
+            tokens: Arguments following ``tick``.
+
+        Returns:
+            Number of ticks (1 when omitted).
+
+        Raises:
+            CommandError: If the value is not a positive integer within limits.
+        """
+        if not tokens:
+            return 1
+        try:
+            count = int(tokens[0])
+        except ValueError:
+            raise CommandError(f"tick count '{tokens[0]}' is not an integer") from None
+        if count < 1 or count > MAX_TICK_REQUEST:
+            raise CommandError(f"tick count must be between 1 and {MAX_TICK_REQUEST}")
+        return count
+</file>
+<file path="src/main.py">
+"""Entry point for the food delivery dispatch simulator command-line tool.
+
+Run with: ``python src/main.py``
+"""
+
+import logging
+import sys
+from typing import Callable, List, Optional
+
+import config
+import globalvar
+from display_manager import DisplayManager
+from input_manager import CommandError, InputManager
+from path_planner import PathPlanner
+from system import SystemManager
+
+logger = logging.getLogger("dispatch")
+
+BANNER = "Food Delivery Dispatch Simulator. Type 'help' for commands."
+
+
+class DispatchApp:
+    """Command dispatcher tying together the system, display and input modules."""
+
+    def __init__(self, reader: Callable[[str], str] = input,
+                 writer: Callable[[str], None] = print,
+                 config_path: str = config.DEFAULT_CONFIG_PATH) -> None:
+        """Build the application.
+
+        Args:
+            reader: Line reader (``input`` by default).
+            writer: Output function (``print`` by default).
+            config_path: Optional JSON configuration file.
+        """
+        params = config.load_config(config_path)
+        self.system = SystemManager(params)
+        self.display = DisplayManager()
+        self.inp = InputManager(reader, writer)
+        self.out = writer
+        self._handlers = {
+            "start": self.cmd_start,
+            "status": self.cmd_status,
+            "orders": self.cmd_orders,
+            "riders": self.cmd_riders,
+            "map": self.cmd_map,
+            "tick": self.cmd_tick,
+            "save": self.cmd_save,
+            "history": self.cmd_history,
+            "help": self.cmd_help,
+            "quit": self.cmd_quit,
+            "exit": self.cmd_quit,
+        }
+
+    def handle(self, name: str, args: List[str]) -> None:
+        """Dispatch a parsed command to its handler."""
+        self._handlers[name](args)
+
+    def cmd_start(self, args: List[str]) -> None:
+        """Create an order, assign it, and run it to completion."""
+        coords = self.inp.parse_coordinates(args) if args else self.inp.prompt_order()
+        order, rider, recruited = self.system.submit_order(*coords)
+        for new_rider in recruited:
+            self.out(f"New rider #{new_rider.rider_id} recruited "
+                     f"(cost {self.system._cfg('recruit_cost')}, "
+                     f"system funds now {self.system.get_funds()})")
+        if rider is None:
+            self.out(f"No rider available and funds ({self.system.get_funds()}) are too "
+                     f"low to recruit. Order #{order.id} remains pending.")
+            return
+
+        start_pos = rider.position
+        trip = PathPlanner.plan_trip(start_pos, order.res_pos, order.cus_pos)
+        trip_distance = PathPlanner.route_length(trip)
+        estimated = PathPlanner.estimate_ticks(trip_distance, rider.speed)
+        try:
+            actual = self.system.run_until_complete(order)
+        except RuntimeError as exc:
+            self.out(f"Error: {exc}")
+            return
+        self.out(self.display.format_order_report(
+            order, rider, start_pos, trip_distance, estimated, actual,
+            bool(recruited)))
+        self.out(self.display.render_map(self.system.riders(), [order], trip))
+
+    def cmd_status(self, _args: List[str]) -> None:
+        """Show funds and every rider's state."""
+        self.out(self.display.format_status(
+            self.system.get_funds(), self.system.riders(), self.system.current_time()))
+
+    def cmd_orders(self, _args: List[str]) -> None:
+        """Show details of all orders."""
+        self.out(self.display.format_orders(self.system.all_orders()))
+
+    def cmd_riders(self, _args: List[str]) -> None:
+        """Show every recorded rider status change."""
+        self.out(self.display.format_rider_log(self.system.riders()))
+
+    def cmd_map(self, _args: List[str]) -> None:
+        """Show the ASCII map with riders and active orders."""
+        active = [o for o in self.system.all_orders() if o.status != "completed"]
+        self.out(self.display.render_map(self.system.riders(), active))
+
+    def cmd_tick(self, args: List[str]) -> None:
+        """Advance the simulation clock."""
+        count = self.inp.parse_tick_count(args)
+        for _ in range(count):
+            self.system.tick()
+        self.out(f"Advanced {count} tick(s). Time is now {self.system.current_time()}.")
+
+    def cmd_save(self, args: List[str]) -> None:
+        """Persist the system state to a JSON file."""
+        path = args[0] if args else config.DEFAULT_STATE_PATH
+        try:
+            self.system.save_state(path)
+            self.out(f"State saved to {path}")
+        except OSError as exc:
+            self.out(f"Error: could not save state: {exc}")
+
+    def cmd_history(self, _args: List[str]) -> None:
+        """Print the command history."""
+        if not self.inp.history:
+            self.out("History is empty.")
+            return
+        for index, entry in enumerate(self.inp.history, start=1):
+            self.out(f"  {index:>3}  {entry}")
+
+    def cmd_help(self, _args: List[str]) -> None:
+        """Print the command reference."""
+        self.out(self.display.format_help())
+
+    def cmd_quit(self, _args: List[str]) -> None:
+        """Stop the main loop."""
+        self.system.stop()
+        self.out("Goodbye.")
+
+    def run(self) -> int:
+        """Run the interactive main loop until quit or end of input.
+
+        Returns:
+            Process exit code (0 on normal exit).
+        """
+        self.out(BANNER)
+        while globalvar.get_value("running", True):
+            try:
+                name, args = self.inp.read_command()
+            except CommandError as exc:
+                self.out(f"Error: {exc}")
+                continue
+            except (EOFError, KeyboardInterrupt):
+                self.out("\nExiting.")
+                break
+            if not name:
+                continue
+            try:
+                self.handle(name, args)
+            except CommandError as exc:
+                self.out(f"Error: {exc}")
+            except Exception as exc:  # Error recovery: keep the simulator alive.
+                logger.exception("Unexpected error while handling '%s'", name)
+                self.out(f"Unexpected error: {exc}. Attempting state recovery...")
+                for fix in self.system.check_consistency():
+                    self.out(f"  recovered: {fix}")
+        return 0
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """Configure logging and run the dispatch application.
+
+    Args:
+        argv: Unused placeholder for future argument parsing.
+
+    Returns:
+        Process exit code.
+    """
+    logging.basicConfig(level=logging.WARNING,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    app = DispatchApp()
+    return app.run()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+</file>
+<file path="src/requirements.txt">
+# This project uses only the Python 3 standard library (3.10+).
+# No third-party packages are required.
+</file>

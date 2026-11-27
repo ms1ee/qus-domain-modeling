@@ -1,0 +1,1471 @@
+<file path="src/data_loader.py">
+"""Data loading utilities for the Beijing Subway network.
+
+The network dataset lives in ``subway_data.json`` next to this module. The
+path is resolved relative to this file so the program works from any
+working directory.
+"""
+
+import json
+import os
+
+DATA_FILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "subway_data.json")
+
+
+def load_subway_data(path=DATA_FILE_PATH) -> dict:
+    """Load the subway network JSON file and return its content as a dict.
+
+    Args:
+        path: Path to the JSON data file.
+
+    Returns:
+        The parsed JSON content (a dict with "stations" and "connections").
+
+    Raises:
+        OSError: If the file cannot be read.
+        ValueError: If the content is not valid JSON or not a JSON object.
+    """
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        raise ValueError("Subway data file must contain a JSON object at the top level")
+    return data
+</file>
+
+<file path="src/models.py">
+"""Core data models for the Beijing Subway fare calculation system.
+
+Contains the weighted undirected graph structure used by the path
+calculation module, plus lightweight dataclasses describing routes,
+transfers, fares, queries, reports and data integrity results.
+"""
+
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+
+class Edge:
+    """A weighted, undirected connection between two stations.
+
+    Attributes:
+        source: Station number of one endpoint.
+        dest: Station number of the other endpoint.
+        distance: Distance between the stations in meters.
+        line: Name of the subway line this connection belongs to.
+    """
+
+    __slots__ = ("source", "dest", "distance", "line")
+
+    def __init__(self, source: int, dest: int, distance: float, line: str):
+        self.source = source
+        self.dest = dest
+        self.distance = float(distance)
+        self.line = line
+
+    @property
+    def weight(self) -> float:
+        """Edge weight used by shortest-path search (equals the distance)."""
+        return self.distance
+
+    def other(self, number: int) -> int:
+        """Return the endpoint opposite to ``number``."""
+        if number == self.source:
+            return self.dest
+        if number == self.dest:
+            return self.source
+        raise ValueError(f"Station number {number} is not an endpoint of this edge")
+
+    def __repr__(self) -> str:
+        return f"Edge({self.source}, {self.dest}, {self.distance}, {self.line!r})"
+
+
+class Graph:
+    """Weighted undirected graph of subway stations.
+
+    Station numbers are assigned by the caller (see ``network.SubwayNetwork``);
+    the graph only records the mapping and the adjacency lists.
+
+    Attributes:
+        station_to_number: Mapping from station name to station number.
+        number_to_station: Mapping from station number to station name.
+        station_lines: Mapping from station name to the list of its lines.
+    """
+
+    def __init__(self):
+        self.station_to_number = {}
+        self.number_to_station = {}
+        self.station_lines = {}
+        self._adjacency = {}  # number -> list of (neighbor_number, Edge)
+        self._edge_count = 0
+
+    @property
+    def node_count(self) -> int:
+        """Number of station nodes in the graph."""
+        return len(self._adjacency)
+
+    @property
+    def edge_count(self) -> int:
+        """Number of undirected edges in the graph."""
+        return self._edge_count
+
+    def register_station(self, station_name: str, number: int) -> None:
+        """Register a station name with an externally assigned number."""
+        existing = self.station_to_number.get(station_name)
+        if existing is not None and existing != number:
+            raise ValueError(f"Station '{station_name}' is already registered with number {existing}")
+        owner = self.number_to_station.get(number)
+        if owner is not None and owner != station_name:
+            raise ValueError(f"Number {number} is already used by station '{owner}'")
+        self.station_to_number[station_name] = number
+        self.number_to_station[number] = station_name
+        self.station_lines.setdefault(station_name, [])
+        self._adjacency.setdefault(number, [])
+
+    def set_station_lines(self, station_name: str, lines: List[str]) -> None:
+        """Set the list of lines that serve a station (duplicates removed)."""
+        self.station_lines[station_name] = list(dict.fromkeys(lines))
+
+    def add_edge(self, edge: Edge) -> None:
+        """Add an undirected edge to the graph."""
+        if edge.source == edge.dest:
+            raise ValueError("Self-loop edges are not allowed")
+        self._adjacency.setdefault(edge.source, []).append((edge.dest, edge))
+        self._adjacency.setdefault(edge.dest, []).append((edge.source, edge))
+        self._edge_count += 1
+
+    def neighbors(self, number: int) -> list:
+        """Return a list of (neighbor_number, Edge) tuples for a station."""
+        return self._adjacency.get(number, [])
+
+    def has_node(self, number: int) -> bool:
+        """Return True if the station number exists in the graph."""
+        return number in self._adjacency
+
+    def has_station(self, station_name: str) -> bool:
+        """Return True if the station name is registered."""
+        return station_name in self.station_to_number
+
+    def get_number(self, station_name: str) -> int:
+        """Return the number of a registered station name."""
+        return self.station_to_number[station_name]
+
+    def get_name(self, number: int) -> str:
+        """Return the name of a station number."""
+        return self.number_to_station[number]
+
+    def station_names(self) -> List[str]:
+        """Return all registered station names."""
+        return list(self.station_to_number)
+
+
+@dataclass
+class Fare:
+    """Computed fare for a trip."""
+
+    amount_yuan: int
+    rounded_distance_km: float
+
+
+@dataclass
+class Segment:
+    """A continuous ride on one line within a route."""
+
+    line: str
+    start_station: str
+    end_station: str
+    station_names: List[str]
+    distance_m: float
+
+    @property
+    def stop_count(self) -> int:
+        """Number of inter-station hops within this segment."""
+        return max(len(self.station_names) - 1, 0)
+
+
+@dataclass
+class Transfer:
+    """A transfer (line change) at a station."""
+
+    station_name: str
+    from_line: str
+    to_line: str
+    transfer_time_minutes: float = 4.0
+
+    @property
+    def involved_lines(self) -> List[str]:
+        """Unique line names involved in this transfer (in order)."""
+        return list(dict.fromkeys([self.from_line, self.to_line]))
+
+    @property
+    def involved_line_count(self) -> int:
+        """Number of distinct lines involved in this transfer."""
+        return len(self.involved_lines)
+
+
+@dataclass
+class Route:
+    """A computed journey between two stations."""
+
+    start_station: str
+    end_station: str
+    mode: str
+    stations: List[str]
+    segments: List[Segment]
+    transfers: List[Transfer]
+    total_distance_m: float
+    estimated_time_min: float
+    fare: Fare
+
+    @property
+    def transfer_count(self) -> int:
+        """Number of transfers on this route."""
+        return len(self.transfers)
+
+    @property
+    def lines(self) -> List[str]:
+        """Unique line names used by this route, in travel order."""
+        return list(dict.fromkeys(segment.line for segment in self.segments))
+
+    @property
+    def total_distance_km(self) -> float:
+        """Total distance in kilometers."""
+        return self.total_distance_m / 1000.0
+
+
+@dataclass
+class Query:
+    """User query parameters together with output options."""
+
+    start_station: str
+    end_station: str
+    mode: str = "shortest_distance"
+    max_transfers: Optional[int] = None
+    line_preference: Optional[str] = None
+    output_format: str = "text"
+    output_file: Optional[str] = None
+
+
+@dataclass
+class Report:
+    """A rendered path report."""
+
+    format: str
+    content: str
+    output_file: Optional[str] = None
+
+
+@dataclass
+class DataIntegrityReport:
+    """Result of a data integrity check."""
+
+    passed: bool
+    issues: List[str] = field(default_factory=list)
+</file>
+
+<file path="src/pathfinding.py">
+"""Shortest path calculation for the subway network.
+
+Implements Dijkstra's algorithm with a binary-heap priority queue
+(``MinPQ``), running in O((V + E) log V). The search operates on states of
+the form ``(station, current_line, transfer_bucket)`` so that line changes
+(transfers), maximum transfer limits and line preferences can be honored
+exactly while still returning the optimal path for the chosen mode.
+"""
+
+from models import Edge, Graph
+
+INF = float("inf")
+
+# Cost (in meters-equivalent) added per transfer in "comprehensive" mode.
+TRANSFER_PENALTY_COMPREHENSIVE_M = 1500.0
+# Very large per-transfer weight used in "least_transfer" mode so that the
+# number of transfers dominates the total distance.
+LEAST_TRANSFER_WEIGHT_M = 1.0e7
+# Cost (in meters-equivalent) added for every edge outside the preferred lines.
+PREFERENCE_PENALTY_M = 500.0
+
+
+class MinPQ:
+    """Min-priority queue implemented as an explicit binary heap."""
+
+    def __init__(self):
+        self._heap = []  # entries: (key, sequence, item)
+        self._seq = 0
+
+    def __len__(self) -> int:
+        return len(self._heap)
+
+    def size(self) -> int:
+        """Return the number of entries in the queue."""
+        return len(self._heap)
+
+    def is_empty(self) -> bool:
+        """Return True if the queue holds no entries."""
+        return not self._heap
+
+    def insert(self, key: float, item) -> None:
+        """Insert an item with the given priority key."""
+        self._heap.append((key, self._seq, item))
+        self._seq += 1
+        self._swim(len(self._heap) - 1)
+
+    def min(self):
+        """Return (key, item) with the smallest key without removing it."""
+        if not self._heap:
+            raise IndexError("MinPQ is empty")
+        key, _, item = self._heap[0]
+        return key, item
+
+    def del_min(self):
+        """Remove and return (key, item) with the smallest key."""
+        if not self._heap:
+            raise IndexError("MinPQ is empty")
+        top = self._heap[0]
+        last = self._heap.pop()
+        if self._heap:
+            self._heap[0] = last
+            self._sink(0)
+        return top[0], top[2]
+
+    def _less(self, i: int, j: int) -> bool:
+        a = self._heap[i]
+        b = self._heap[j]
+        return (a[0], a[1]) < (b[0], b[1])
+
+    def _swap(self, i: int, j: int) -> None:
+        self._heap[i], self._heap[j] = self._heap[j], self._heap[i]
+
+    def _swim(self, k: int) -> None:
+        while k > 0:
+            parent = (k - 1) // 2
+            if self._less(k, parent):
+                self._swap(k, parent)
+                k = parent
+            else:
+                break
+
+    def _sink(self, k: int) -> None:
+        n = len(self._heap)
+        while True:
+            left = 2 * k + 1
+            if left >= n:
+                break
+            child = left
+            right = left + 1
+            if right < n and self._less(right, left):
+                child = right
+            if self._less(child, k):
+                self._swap(k, child)
+                k = child
+            else:
+                break
+
+
+class PathfindingConfig:
+    """Configuration of a path query.
+
+    Attributes:
+        mode: One of ``shortest_distance``, ``least_transfer``, ``comprehensive``.
+        max_transfers: Maximum allowed transfers, or None for no limit.
+        preferred_lines: List of line names preferred during routing.
+    """
+
+    SHORTEST_DISTANCE = "shortest_distance"
+    LEAST_TRANSFER = "least_transfer"
+    COMPREHENSIVE = "comprehensive"
+    MODES = (SHORTEST_DISTANCE, LEAST_TRANSFER, COMPREHENSIVE)
+
+    def __init__(self, mode: str = SHORTEST_DISTANCE, max_transfers=None, preferred_lines=None):
+        if mode not in self.MODES:
+            raise ValueError(f"Unsupported mode '{mode}', expected one of {', '.join(self.MODES)}")
+        if max_transfers is not None:
+            if isinstance(max_transfers, bool) or not isinstance(max_transfers, int) or max_transfers < 0:
+                raise ValueError("max_transfers must be a non-negative integer or None")
+        self.mode = mode
+        self.max_transfers = max_transfers
+        self.preferred_lines = list(preferred_lines or [])
+
+
+class ShortestPath:
+    """Dijkstra-based shortest path search from a single source station.
+
+    Args:
+        graph: The subway ``Graph``.
+        source: Station number of the starting station.
+        config: Optional ``PathfindingConfig``; defaults to shortest distance
+            with no transfer limit and no line preference.
+
+    Attributes:
+        dist_to: Mapping from station number to the minimal search cost
+            (equal to the distance in meters for the default configuration).
+    """
+
+    def __init__(self, graph: Graph, source: int, config: PathfindingConfig = None):
+        if not graph.has_node(source):
+            raise ValueError(f"Unknown source station number: {source}")
+        self.graph = graph
+        self.source = source
+        self.config = config if config is not None else PathfindingConfig()
+        self.dist_to = {}
+        self._state_cost = {}   # state -> accumulated search cost
+        self._state_info = {}   # state -> (distance_m, transfers)
+        self._edge_to = {}      # state -> (previous_state, Edge)
+        self._best_state = {}   # station number -> best state reaching it
+        self._run()
+
+    def _step_cost(self, edge: Edge, transfer_delta: int) -> float:
+        """Search cost of traversing ``edge`` under the current configuration."""
+        cost = edge.distance
+        preferred = self.config.preferred_lines
+        if preferred and edge.line not in preferred:
+            cost += PREFERENCE_PENALTY_M
+        if self.config.mode == PathfindingConfig.LEAST_TRANSFER:
+            cost += transfer_delta * LEAST_TRANSFER_WEIGHT_M
+        elif self.config.mode == PathfindingComprehensiveMode.VALUE:
+            cost += transfer_delta * TRANSFER_PENALTY_COMPREHENSIVE_M
+        return cost
+
+    def _run(self) -> None:
+        """Execute Dijkstra's algorithm over (station, line, bucket) states."""
+        max_transfers = self.config.max_transfers
+        start_state = (self.source, None, 0)
+        self._state_cost[start_state] = 0.0
+        self._state_info[start_state] = (0.0, 0)
+
+        pq = MinPQ()
+        pq.insert(0.0, start_state)
+
+        while not pq.is_empty():
+            cost, state = pq.del_min()
+            if cost > self._state_cost[state]:
+                continue  # stale queue entry
+            node, line, _ = state
+            dist_m, transfers = self._state_info[state]
+
+            for neighbor, edge in self.graph.neighbors(node):
+                delta = 1 if (line is not None and edge.line != line) else 0
+                new_transfers = transfers + delta
+                if max_transfers is not None and new_transfers > max_transfers:
+                    continue
+                bucket = 0 if max_transfers is None else new_transfers
+                new_state = (neighbor, edge.line, bucket)
+                new_cost = cost + self._step_cost(edge, delta)
+                if new_cost < self._state_cost.get(new_state, INF):
+                    self._state_cost[new_state] = new_cost
+                    self._state_info[new_state] = (dist_m + edge.distance, new_transfers)
+                    self._edge_to[new_state] = (state, edge)
+                    pq.insert(new_cost, new_state)
+
+        for state, cost in self._state_cost.items():
+            node = state[0]
+            current = self._best_state.get(node)
+            if current is None or cost < self._state_cost[current]:
+                self._best_state[node] = state
+        self.dist_to = {node: self._state_cost[state] for node, state in self._best_state.items()}
+
+    def has_path(self, target: int) -> bool:
+        """Return True if ``target`` is reachable under the configuration."""
+        return target in self._best_state
+
+    def path_with_edges(self, target: int):
+        """Return ``(station_numbers, edges)`` from the source to ``target``.
+
+        Returns ``([], [])`` if the target is unreachable.
+        """
+        state = self._best_state.get(target)
+        if state is None:
+            return [], []
+        nodes = [target]
+        edges = []
+        while state in self._edge_to:
+            previous, edge = self._edge_to[state]
+            edges.append(edge)
+            nodes.append(previous[0])
+            state = previous
+        nodes.reverse()
+        edges.reverse()
+        return nodes, edges
+
+    def get_transfer_count(self, target: int) -> int:
+        """Return the number of transfers on the path to ``target``.
+
+        Returns -1 if the target is unreachable.
+        """
+        state = self._best_state.get(target)
+        if state is None:
+            return -1
+        return self._state_info[state][1]
+
+    def get_path_distance(self, target: int) -> float:
+        """Return the actual travelled distance in meters to ``target``.
+
+        Returns -1.0 if the target is unreachable.
+        """
+        state = self._best_state.get(target)
+        if state is None:
+            return -1.0
+        return self._state_info[state][0]
+
+
+class PathfindingComprehensiveMode:
+    """Helper namespace holding the comprehensive mode constant."""
+
+    VALUE = PathfindingConfig.COMPREHENSIVE
+</file>
+
+<file path="src/fare_calculator.py">
+"""Beijing Subway fare calculation.
+
+Fare structure:
+    0-6 km: 3 yuan
+    6-12 km: 4 yuan
+    12-22 km: 5 yuan
+    22-32 km: 6 yuan
+    beyond 32 km: 6 yuan plus 1 yuan for every additional 20 km
+
+Distances are rounded up to whole kilometers before applying the tiers,
+so any fractional kilometer counts as a full kilometer (ceiling rounding).
+"""
+
+import math
+from dataclasses import dataclass
+
+from models import Fare
+
+AVERAGE_SPEED_KMH = 35.0
+TRANSFER_TIME_MINUTES = 4.0
+
+
+@dataclass(frozen=True)
+class FareRule:
+    """A distance tier of the fare structure.
+
+    Attributes:
+        min_distance_km: Lower bound of the tier (exclusive, except for the first tier).
+        max_distance_km: Upper bound of the tier (inclusive).
+        fare_yuan: Fare in yuan for the tier.
+        increment_km: Distance per extra fare step (0 for fixed tiers).
+    """
+
+    min_distance_km: float
+    max_distance_km: float
+    fare_yuan: int
+    increment_km: float = 0.0
+
+
+FARE_RULES = (
+    FareRule(0.0, 6.0, 3),
+    FareRule(6.0, 12.0, 4),
+    FareRule(12.0, 22.0, 5),
+    FareRule(22.0, 32.0, 6),
+)
+
+# Extension beyond the last fixed tier: +1 yuan for every 20 km.
+EXTENSION_BASE_KM = 32.0
+EXTENSION_INCREMENT_KM = 20
+EXTENSION_STEP_YUAN = 1
+
+
+def _validate_distance(distance) -> float:
+    """Validate a distance in meters and return it as float."""
+    if isinstance(distance, bool) or not isinstance(distance, (int, float)):
+        raise TypeError("Distance must be a number of meters")
+    value = float(distance)
+    if math.isnan(value) or math.isinf(value):
+        raise ValueError("Distance must be a finite number")
+    if value < 0:
+        raise ValueError("Distance cannot be negative")
+    return value
+
+
+def rounded_distance_km(distance: float) -> int:
+    """Return the distance in meters rounded up to whole kilometers."""
+    value = _validate_distance(distance)
+    return int(math.ceil(round(value / 1000.0, 9)))
+
+
+def Sum_money(distance: float) -> int:
+    """Calculate the subway fare in yuan for a distance given in meters.
+
+    Args:
+        distance: Travelled distance in meters.
+
+    Returns:
+        The fare in yuan (integer).
+    """
+    km = rounded_distance_km(distance)
+    for rule in FARE_RULES:
+        if km <= rule.max_distance_km:
+            return rule.fare_yuan
+    last_rule = FARE_RULES[-1]
+    extra_km = km - EXTENSION_BASE_KM
+    steps = -(-int(extra_km) // EXTENSION_INCREMENT_KM)  # ceiling division
+    return last_rule.fare_yuan + steps * EXTENSION_STEP_YUAN
+
+
+def calculate_fare(distance: float) -> Fare:
+    """Return a ``Fare`` object describing the fare for a distance in meters."""
+    return Fare(amount_yuan=Sum_money(distance),
+                rounded_distance_km=float(rounded_distance_km(distance)))
+
+
+def calculate_estimated_time(distance: float, transfer_count: int) -> float:
+    """Estimate the travel time in minutes.
+
+    Args:
+        distance: Travelled distance in meters.
+        transfer_count: Number of transfers on the route.
+
+    Returns:
+        Estimated travel time in minutes, including transfer time.
+    """
+    value = _validate_distance(distance)
+    if isinstance(transfer_count, bool) or not isinstance(transfer_count, int) or transfer_count < 0:
+        raise ValueError("transfer_count must be a non-negative integer")
+    travel_minutes = (value / 1000.0) / AVERAGE_SPEED_KMH * 60.0
+    return travel_minutes + transfer_count * TRANSFER_TIME_MINUTES
+</file>
+
+<file path="src/network.py">
+"""Subway network data management.
+
+``SubwayNetwork`` owns the station, line and connection data, builds the
+weighted graph used by the path calculation module, supports data updates
+(new lines, station modifications, distance updates) and performs data
+integrity checks.
+"""
+
+from data_loader import DATA_FILE_PATH, load_subway_data
+from models import DataIntegrityReport, Edge, Graph
+
+MIN_DISTANCE_M = 1
+MAX_DISTANCE_M = 10000
+
+REQUIRED_MAIN_LINES = (
+    "Line 1", "Line 2", "Line 4", "Line 5", "Line 6", "Line 8", "Line 10",
+    "Line 13", "Line 14", "Line 15", "Changping Line", "Yizhuang Line",
+    "Fangshan Line", "Airport Line",
+)
+
+# Representative stations used to verify coverage of main lines.
+REPRESENTATIVE_STATIONS = {
+    "Line 1": "Pingguoyuan",
+    "Line 2": "Dongzhimen",
+    "Line 4": "Xizhimen",
+    "Line 5": "Songjiazhuang",
+    "Line 6": "Chaoyangmen",
+    "Line 8": "Shichahai",
+    "Line 10": "Bagou",
+    "Line 13": "Xi'erqi",
+}
+
+
+def _dedupe(values):
+    """Return a list with duplicates removed and order preserved."""
+    return list(dict.fromkeys(str(value) for value in values))
+
+
+def _validate_distance(distance) -> None:
+    """Raise ValueError if the distance is not a positive number."""
+    if isinstance(distance, bool) or not isinstance(distance, (int, float)):
+        raise ValueError(f"Distance must be a number, got {distance!r}")
+    if distance <= 0:
+        raise ValueError(f"Distance must be positive, got {distance!r}")
+
+
+class SubwayNetwork:
+    """In-memory model of the Beijing Subway network.
+
+    Args:
+        data: Parsed subway data dict. If None, ``subway_data.json`` is loaded.
+        data_source: Human-readable description of the data source.
+    """
+
+    def __init__(self, data: dict = None, data_source: str = None):
+        if data is None:
+            data = load_subway_data(DATA_FILE_PATH)
+        self.name = "Beijing Subway"
+        self.data_source = data_source or DATA_FILE_PATH
+        self._stations = {}      # station name -> list of line names
+        self._connections = []   # list of dicts: source, dest, distance, line
+        self._graph = None
+        self._load(data)
+
+    # ------------------------------------------------------------------ loading
+    def _load(self, data) -> None:
+        """Populate internal structures from the raw data dict."""
+        if not isinstance(data, dict):
+            raise ValueError("Subway data must be a JSON object")
+        stations = data.get("stations")
+        connections = data.get("connections")
+        if not isinstance(stations, list) or not isinstance(connections, list):
+            raise ValueError("Subway data must contain 'stations' and 'connections' lists")
+
+        for entry in stations:
+            if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+                raise ValueError(f"Malformed station entry: {entry!r}")
+            lines = entry.get("lines", [])
+            if not isinstance(lines, list):
+                raise ValueError(f"Station lines must be a list: {entry!r}")
+            name = entry["name"]
+            merged = self._stations.get(name, []) + [str(line) for line in lines]
+            self._stations[name] = _dedupe(merged)
+
+        for conn in connections:
+            if not isinstance(conn, dict):
+                raise ValueError(f"Malformed connection entry: {conn!r}")
+            for key in ("source", "dest", "distance", "line"):
+                if key not in conn:
+                    raise ValueError(f"Connection missing field '{key}': {conn!r}")
+            if not isinstance(conn["source"], str) or not isinstance(conn["dest"], str):
+                raise ValueError(f"Connection endpoints must be strings: {conn!r}")
+            if not isinstance(conn["distance"], (int, float)) or isinstance(conn["distance"], bool):
+                raise ValueError(f"Connection distance must be numeric: {conn!r}")
+            self._connections.append({
+                "source": conn["source"],
+                "dest": conn["dest"],
+                "distance": conn["distance"],
+                "line": str(conn["line"]),
+            })
+
+    def _invalidate(self) -> None:
+        """Discard the cached graph after data changes."""
+        self._graph = None
+
+    # ------------------------------------------------------------ graph access
+    def _ordered_station_names(self):
+        names = list(self._stations)
+        seen = set(names)
+        for conn in self._connections:
+            for key in ("source", "dest"):
+                if conn[key] not in seen:
+                    seen.add(conn[key])
+                    names.append(conn[key])
+        return names
+
+    def build_graph(self) -> Graph:
+        """Build a new ``Graph`` from the current data.
+
+        Station numbers are assigned here (the caller), in order of first
+        appearance in the station list.
+        """
+        graph = Graph()
+        numbers = {}
+        for index, name in enumerate(self._ordered_station_names()):
+            graph.register_station(name, index)
+            numbers[name] = index
+            graph.set_station_lines(name, self._stations.get(name, []))
+        for conn in self._connections:
+            src = numbers[conn["source"]]
+            dst = numbers[conn["dest"]]
+            if src == dst:
+                continue  # self-loops are reported by the integrity check
+            graph.add_edge(Edge(src, dst, conn["distance"], conn["line"]))
+        return graph
+
+    @property
+    def graph(self) -> Graph:
+        """The cached weighted graph of the network (built on demand)."""
+        if self._graph is None:
+            self._graph = self.build_graph()
+        return self._graph
+
+    # ---------------------------------------------------------------- queries
+    def station_names(self):
+        """Return a sorted list of all station names."""
+        return sorted(self._ordered_station_names())
+
+    def has_station(self, name: str) -> bool:
+        """Return True if the station exists in the network."""
+        return name in self._stations or any(
+            name in (c["source"], c["dest"]) for c in self._connections)
+
+    def station_lines(self, name: str):
+        """Return a copy of the list of lines serving a station."""
+        return list(self._stations.get(name, []))
+
+    def line_names(self):
+        """Return a sorted list of all line names in the network."""
+        lines = set()
+        for station_lines in self._stations.values():
+            lines.update(station_lines)
+        lines.update(conn["line"] for conn in self._connections)
+        return sorted(lines)
+
+    def connections(self):
+        """Return a copy of the connection records."""
+        return [dict(conn) for conn in self._connections]
+
+    # ----------------------------------------------------------- data updates
+    def add_line(self, line_name: str, station_sequence, distances) -> None:
+        """Add a new line described by its ordered stations and segment distances.
+
+        Args:
+            line_name: Name of the new line (must not already exist).
+            station_sequence: Ordered list of station names (at least two).
+            distances: Distances in meters between consecutive stations.
+        """
+        if not line_name or not isinstance(line_name, str):
+            raise ValueError("Line name must be a non-empty string")
+        if line_name in self.line_names():
+            raise ValueError(f"Line '{line_name}' already exists")
+        stations = list(station_sequence)
+        distances = list(distances)
+        if len(stations) < 2:
+            raise ValueError("A line needs at least two stations")
+        if len(distances) != len(stations) - 1:
+            raise ValueError("Number of distances must be one less than the number of stations")
+        for distance in distances:
+            _validate_distance(distance)
+        for name in stations:
+            current = self._stations.setdefault(name, [])
+            if line_name not in current:
+                current.append(line_name)
+        for index, distance in enumerate(distances):
+            self._connections.append({
+                "source": stations[index],
+                "dest": stations[index + 1],
+                "distance": distance,
+                "line": line_name,
+            })
+        self._invalidate()
+
+    def modify_station(self, name: str, new_name: str = None, lines=None) -> str:
+        """Rename a station and/or replace its list of lines.
+
+        Returns:
+            The (possibly new) station name.
+        """
+        if name not in self._stations and not self.has_station(name):
+            raise KeyError(f"Station '{name}' does not exist")
+        current = name
+        if new_name and new_name != name:
+            if self.has_station(new_name):
+                raise ValueError(f"Station '{new_name}' already exists")
+            self._stations[new_name] = self._stations.pop(name, [])
+            for conn in self._connections:
+                if conn["source"] == name:
+                    conn["source"] = new_name
+                if conn["dest"] == name:
+                    conn["dest"] = new_name
+            current = new_name
+        if lines is not None:
+            self._stations[current] = _dedupe(lines)
+        self._invalidate()
+        return current
+
+    def update_distance(self, source: str, dest: str, distance, line: str = None) -> int:
+        """Update the distance between two adjacent stations.
+
+        Returns:
+            The number of connection records updated.
+        """
+        _validate_distance(distance)
+        updated = 0
+        for conn in self._connections:
+            pair = {conn["source"], conn["dest"]} == {source, dest}
+            if pair and (line is None or conn["line"] == line):
+                conn["distance"] = distance
+                updated += 1
+        if updated == 0:
+            raise KeyError(f"No connection found between '{source}' and '{dest}'")
+        self._invalidate()
+        return updated
+
+    # --------------------------------------------------------- integrity check
+    def check_integrity(self) -> DataIntegrityReport:
+        """Run data integrity checks and return a ``DataIntegrityReport``."""
+        issues = []
+        line_set = set(self.line_names())
+
+        # Coverage of main lines and representative stations.
+        for line in REQUIRED_MAIN_LINES:
+            if line not in line_set:
+                issues.append(f"Main line '{line}' has no connections in the network data")
+        for line, station in REPRESENTATIVE_STATIONS.items():
+            if station not in self._stations:
+                issues.append(f"Representative station '{station}' of {line} is missing")
+            elif line not in self._stations[station]:
+                issues.append(f"Representative station '{station}' does not list {line}")
+
+        # Connection integrity.
+        seen_pairs = set()
+        for conn in self._connections:
+            src, dst, line = conn["source"], conn["dest"], conn["line"]
+            label = f"'{src}'-'{dst}' ({line})"
+            if src not in self._stations:
+                issues.append(f"Connection {label} references unknown station '{src}'")
+            if dst not in self._stations:
+                issues.append(f"Connection {label} references unknown station '{dst}'")
+            if src == dst:
+                issues.append(f"Connection {label} links a station to itself")
+            for endpoint in (src, dst):
+                if endpoint in self._stations and line not in self._stations[endpoint]:
+                    issues.append(f"Station '{endpoint}' does not list line '{line}' used by {label}")
+            key = (min(src, dst), max(src, dst), line)
+            if key in seen_pairs:
+                issues.append(f"Duplicate connection {label}")
+            seen_pairs.add(key)
+
+            # Distance accuracy.
+            distance = conn["distance"]
+            if not isinstance(distance, (int, float)) or distance < MIN_DISTANCE_M or distance > MAX_DISTANCE_M:
+                issues.append(f"Distance {distance!r} of connection {label} is outside "
+                              f"{MIN_DISTANCE_M}-{MAX_DISTANCE_M} meters")
+
+        # Stations without any connection.
+        connected = set()
+        for conn in self._connections:
+            connected.add(conn["source"])
+            connected.add(conn["dest"])
+        for name in self._stations:
+            if name not in connected:
+                issues.append(f"Station '{name}' has no connections")
+
+        # Connectivity of the network.
+        parent = {}
+
+        def find(node):
+            parent.setdefault(node, node)
+            while parent[node] != node:
+                parent[node] = parent[parent[node]]
+                node = parent[node]
+            return node
+
+        for name in self._ordered_station_names():
+            find(name)
+        for conn in self._connections:
+            root_a, root_b = find(conn["source"]), find(conn["dest"])
+            if root_a != root_b:
+                parent[root_a] = root_b
+        components = {find(node) for node in parent}
+        if len(components) > 1:
+            issues.append(f"Network is split into {len(components)} disconnected components")
+
+        return DataIntegrityReport(passed=not issues, issues=issues)
+</file>
+
+<file path="src/route_service.py">
+"""Query processing: input parsing, station standardization and route building.
+
+``RouteService`` ties together the network, the shortest path search, the
+fare calculator and the route model. It raises ``QueryError`` subclasses with
+user-facing messages for every recoverable problem.
+"""
+
+from fare_calculator import calculate_estimated_time, calculate_fare
+from models import Route, Segment, Transfer
+from network import SubwayNetwork
+from pathfinding import PathfindingConfig, ShortestPath
+
+
+class QueryError(Exception):
+    """Base class for all user-facing query errors."""
+
+
+class InputFormatError(QueryError):
+    """The query text is not in 'Starting Station; Ending Station' format."""
+
+
+class StationNotFoundError(QueryError):
+    """A station name does not exist in the network."""
+
+
+class LogicalQueryError(QueryError):
+    """The query is logically invalid (e.g. identical start and end)."""
+
+
+class PathNotFoundError(QueryError):
+    """No route exists under the given constraints."""
+
+
+class PathCalculationError(QueryError):
+    """An unexpected error occurred during path calculation."""
+
+
+class FareCalculationError(QueryError):
+    """An error occurred during fare calculation."""
+
+
+def normalize_station_name(name: str) -> str:
+    """Return a comparison key for a station name.
+
+    The key ignores case, whitespace and a trailing '站' / 'station' suffix.
+    """
+    text = "".join(name.split()).lower()
+    if text.endswith("station"):
+        text = text[:-len("station")]
+    if text.endswith("站"):
+        text = text[:-1]
+    return text
+
+
+class RouteService:
+    """Parses queries and computes routes over a ``SubwayNetwork``."""
+
+    def __init__(self, network: SubwayNetwork):
+        self.network = network
+
+    # ------------------------------------------------------- input handling
+    def _build_index(self):
+        index = {}
+        for name in self.network.station_names():
+            index.setdefault(normalize_station_name(name), name)
+        return index
+
+    def standardize_station(self, raw: str, role: str) -> str:
+        """Map user input to an official station name.
+
+        Args:
+            raw: The station name typed by the user.
+            role: "Starting" or "Ending", used in error messages.
+
+        Raises:
+            StationNotFoundError: If no matching station exists.
+        """
+        text = raw.strip()
+        if self.network.has_station(text):
+            return text
+        key = normalize_station_name(text)
+        if key:
+            official = self._build_index().get(key)
+            if official is not None:
+                return official
+        raise StationNotFoundError(
+            f"{role} station '{text}' does not exist, please check the station name")
+
+    def parse_query(self, text: str):
+        """Parse 'Starting Station; Ending Station' into official station names.
+
+        Raises:
+            InputFormatError: If the text is not in the expected format.
+            StationNotFoundError: If a station name is unknown.
+            LogicalQueryError: If start and end are the same station.
+        """
+        parts = text.replace("\uff1b", ";").split(";")
+        if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+            raise InputFormatError(
+                "Input format incorrect, please use 'Starting Station; Ending Station' format")
+        start = self.standardize_station(parts[0], "Starting")
+        end = self.standardize_station(parts[1], "Ending")
+        if start == end:
+            raise LogicalQueryError("Starting station cannot be the same as the ending station")
+        return start, end
+
+    # ----------------------------------------------------------- computation
+    def query(self, start: str, end: str, mode: str = PathfindingConfig.SHORTEST_DISTANCE,
+              max_transfers=None, line_preference=None) -> Route:
+        """Compute the route between two official station names.
+
+        Args:
+            start: Official starting station name.
+            end: Official ending station name.
+            mode: Path query mode.
+            max_transfers: Maximum allowed transfers, or None.
+            line_preference: Preferred line name, or None.
+
+        Returns:
+            A fully populated ``Route``.
+
+        Raises:
+            QueryError (or a subclass) describing the failure.
+        """
+        if mode not in PathfindingConfig.MODES:
+            raise QueryError(f"Unsupported mode '{mode}'")
+        if not self.network.has_station(start):
+            raise StationNotFoundError(f"Starting station '{start}' does not exist, please check the station name")
+        if not self.network.has_station(end):
+            raise StationNotFoundError(f"Ending station '{end}' does not exist, please check the station name")
+        if start == end:
+            raise LogicalQueryError("Starting station cannot be the same as the ending station")
+        if line_preference and line_preference not in self.network.line_names():
+            raise QueryError(f"Line preference '{line_preference}' does not exist")
+        try:
+            config = PathfindingConfig(mode, max_transfers,
+                                       [line_preference] if line_preference else [])
+        except ValueError as exc:
+            raise QueryError(str(exc)) from exc
+
+        graph = self.network.graph
+        try:
+            source_number = graph.get_number(start)
+            target_number = graph.get_number(end)
+            search = ShortestPath(graph, source_number, config)
+            if not search.has_path(target_number):
+                if max_transfers is not None:
+                    raise PathNotFoundError(
+                        f"No route found from '{start}' to '{end}' within {max_transfers} transfers")
+                raise PathNotFoundError(f"No route found from '{start}' to '{end}'")
+            numbers, edges = search.path_with_edges(target_number)
+        except QueryError:
+            raise
+        except Exception as exc:
+            raise PathCalculationError(f"Path calculation failed: {exc}") from exc
+
+        if not edges:
+            raise PathNotFoundError(f"No route found from '{start}' to '{end}'")
+        names = [graph.get_name(number) for number in numbers]
+        return self._build_route(start, end, mode, names, edges)
+
+    def _build_route(self, start, end, mode, names, edges) -> Route:
+        """Assemble segments, transfers, distance, fare and time into a Route."""
+        segments = []
+        segment_start = 0
+        segment_distance = 0.0
+        for index, edge in enumerate(edges):
+            if index > 0 and edge.line != edges[index - 1].line:
+                segments.append(Segment(
+                    line=edges[index - 1].line,
+                    start_station=names[segment_start],
+                    end_station=names[index],
+                    station_names=names[segment_start:index + 1],
+                    distance_m=segment_distance))
+                segment_start = index
+                segment_distance = 0.0
+            segment_distance += edge.distance
+        segments.append(Segment(
+            line=edges[-1].line,
+            start_station=names[segment_start],
+            end_station=names[-1],
+            station_names=names[segment_start:],
+            distance_m=segment_distance))
+
+        transfers = [
+            Transfer(station_name=segments[i].start_station,
+                     from_line=segments[i - 1].line,
+                     to_line=segments[i].line)
+            for i in range(1, len(segments))
+        ]
+        total_distance = sum(segment.distance_m for segment in segments)
+
+        try:
+            fare = calculate_fare(total_distance)
+        except (TypeError, ValueError) as exc:
+            raise FareCalculationError(f"Fare calculation failed: {exc}") from exc
+        estimated = calculate_estimated_time(total_distance, len(transfers))
+
+        return Route(
+            start_station=start,
+            end_station=end,
+            mode=mode,
+            stations=names,
+            segments=segments,
+            transfers=transfers,
+            total_distance_m=total_distance,
+            estimated_time_min=estimated,
+            fare=fare,
+        )
+</file>
+
+<file path="src/report.py">
+"""Path visualization and report export.
+
+Renders a ``Route`` as console text or structured JSON, builds path summaries
+and writes reports to files.
+"""
+
+import json
+import os
+
+from models import Query, Report, Route
+
+FORMAT_TEXT = "text"
+FORMAT_JSON = "json"
+SUPPORTED_FORMATS = (FORMAT_TEXT, FORMAT_JSON)
+
+SEPARATOR = "=" * 60
+DIVIDER = "-" * 60
+
+
+def format_distance(distance_m: float) -> str:
+    """Format a distance: meters for short distances, kilometers for long ones.
+
+    Examples: "850 m (0.85 km)" and "12.50 km (12500 m)".
+    """
+    if distance_m < 1000:
+        return f"{distance_m:.0f} m ({distance_m / 1000:.2f} km)"
+    return f"{distance_m / 1000:.2f} km ({distance_m:.0f} m)"
+
+
+def build_summary(route: Route) -> dict:
+    """Extract the key summary information of a route."""
+    return {
+        "total_distance_km": round(route.total_distance_m / 1000.0, 3),
+        "total_distance_m": round(route.total_distance_m, 1),
+        "total_fare_yuan": route.fare.amount_yuan,
+        "transfer_count": route.transfer_count,
+        "estimated_time_min": round(route.estimated_time_min, 1),
+    }
+
+
+def render_text(route: Route, query: Query) -> str:
+    """Render the route as human-readable console text."""
+    max_text = "unlimited" if query.max_transfers is None else str(query.max_transfers)
+    preference = query.line_preference or "none"
+    lines = [
+        SEPARATOR,
+        "Beijing Subway Fare Query Result",
+        SEPARATOR,
+        f"From: {route.start_station}",
+        f"To: {route.end_station}",
+        f"Mode: {route.mode}",
+        f"Max transfers: {max_text}",
+        f"Line preference: {preference}",
+        DIVIDER,
+        f"Station sequence ({len(route.stations)} stations):",
+    ]
+    for index, name in enumerate(route.stations, 1):
+        lines.append(f"  {index:>3}. {name}")
+
+    lines.append(DIVIDER)
+    lines.append("Line segments:")
+    for segment in route.segments:
+        lines.append(
+            f"  [{segment.line}] {segment.start_station} -> {segment.end_station} "
+            f"({segment.stop_count} stops, {format_distance(segment.distance_m)})")
+
+    lines.append(DIVIDER)
+    lines.append("Transfer details:")
+    if not route.transfers:
+        lines.append("  None (direct route)")
+    else:
+        for index, transfer in enumerate(route.transfers, 1):
+            lines.append(
+                f"  {index}. {transfer.station_name}: {transfer.from_line} -> {transfer.to_line} "
+                f"(lines involved: {', '.join(transfer.involved_lines)})")
+
+    lines.append(DIVIDER)
+    lines.append(f"Lines involved: {', '.join(route.lines)}")
+    lines.append(f"Total distance: {format_distance(route.total_distance_m)}")
+    lines.append(f"Transfer count: {route.transfer_count}")
+    lines.append(f"Estimated time: {route.estimated_time_min:.1f} minutes")
+    lines.append(f"Fare: {route.fare.amount_yuan} yuan")
+    lines.append(SEPARATOR)
+    return "\n".join(lines)
+
+
+def render_json(route: Route, query: Query) -> str:
+    """Render the route as a structured JSON document."""
+    document = {
+        "query": {
+            "start_station": query.start_station,
+            "end_station": query.end_station,
+            "mode": query.mode,
+            "max_transfers": query.max_transfers,
+            "line_preference": query.line_preference,
+        },
+        "path": list(route.stations),
+        "distance_m": round(route.total_distance_m, 1),
+        "distance_km": round(route.total_distance_m / 1000.0, 3),
+        "fare_yuan": route.fare.amount_yuan,
+        "rounded_distance_km": route.fare.rounded_distance_km,
+        "estimated_time_min": round(route.estimated_time_min, 1),
+        "transfer_count": route.transfer_count,
+        "lines": route.lines,
+        "transfers": [
+            {
+                "station": transfer.station_name,
+                "from_line": transfer.from_line,
+                "to_line": transfer.to_line,
+            }
+            for transfer in route.transfers
+        ],
+        "segments": [
+            {
+                "line": segment.line,
+                "start_station": segment.start_station,
+                "end_station": segment.end_station,
+                "stations": list(segment.station_names),
+                "distance_m": round(segment.distance_m, 1),
+            }
+            for segment in route.segments
+        ],
+        "summary": build_summary(route),
+    }
+    return json.dumps(document, indent=2, ensure_ascii=False)
+
+
+def create_report(route: Route, query: Query, output_format: str = None) -> Report:
+    """Create a ``Report`` in the requested format (defaults to the query's format).
+
+    Raises:
+        ValueError: If the format is not supported.
+    """
+    fmt = output_format or query.output_format or FORMAT_TEXT
+    if fmt == FORMAT_TEXT:
+        content = render_text(route, query)
+    elif fmt == FORMAT_JSON:
+        content = render_json(route, query)
+    else:
+        raise ValueError(f"Unsupported output format '{fmt}'")
+    return Report(format=fmt, content=content, output_file=query.output_file)
+
+
+def export_report(report: Report, output_file: str) -> str:
+    """Write the report content to ``output_file`` (UTF-8, overwriting).
+
+    Returns:
+        The path the report was written to.
+
+    Raises:
+        OSError: If the file cannot be written.
+    """
+    directory = os.path.dirname(os.path.abspath(output_file))
+    os.makedirs(directory, exist_ok=True)
+    with open(output_file, "w", encoding="utf-8") as handle:
+        handle.write(report.content)
+        handle.write("\n")
+    return output_file
+</file>
+
+<file path="src/cli.py">
+"""Command-line interface for the Beijing Subway fare calculator.
+
+Supports interactive continuous queries, command-line options and the
+``--check_data`` integrity check.
+"""
+
+import argparse
+
+from data_loader import DATA_FILE_PATH, load_subway_data
+from models import Query
+from network import SubwayNetwork
+from pathfinding import PathfindingConfig
+from report import SUPPORTED_FORMATS, create_report, export_report
+from route_service import QueryError, RouteService
+
+EXIT_WORDS = ("quit", "exit", "q")
+PROMPT = "Enter query as 'Starting Station; Ending Station' (or 'quit' to exit): "
+
+
+def _non_negative_int(value: str) -> int:
+    """argparse type: parse a non-negative integer."""
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid integer value: '{value}'") from exc
+    if number < 0:
+        raise argparse.ArgumentTypeError("value must be a non-negative integer")
+    return number
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Create the command-line argument parser."""
+    parser = argparse.ArgumentParser(
+        prog="subway_fare",
+        description="Beijing Subway fare calculation system (CLI).")
+    parser.add_argument("--output_file", default=None,
+                        help="Export each query result to this file (overwritten per query).")
+    parser.add_argument("--format", dest="output_format", choices=SUPPORTED_FORMATS, default="text",
+                        help="Output format: text or json (default: text).")
+    parser.add_argument("--mode", choices=PathfindingConfig.MODES,
+                        default=PathfindingConfig.SHORTEST_DISTANCE,
+                        help="Path query mode (default: shortest_distance).")
+    parser.add_argument("--max_transfers", type=_non_negative_int, default=None,
+                        help="Maximum number of transfers allowed.")
+    parser.add_argument("--line_preference", default=None,
+                        help="Preferred line name, e.g. 'Line 1'.")
+    parser.add_argument("--check_data", action="store_true",
+                        help="Run the data integrity check and exit.")
+    return parser
+
+
+def handle_query(service: RouteService, text: str, args, output_func) -> bool:
+    """Process one query line. Returns True on success."""
+    try:
+        start, end = service.parse_query(text)
+        route = service.query(start, end, args.mode, args.max_transfers, args.line_preference)
+        query = Query(
+            start_station=start,
+            end_station=end,
+            mode=args.mode,
+            max_transfers=args.max_transfers,
+            line_preference=args.line_preference,
+            output_format=args.output_format,
+            output_file=args.output_file,
+        )
+        report = create_report(route, query)
+    except QueryError as exc:
+        output_func(f"Error: {exc}")
+        return False
+    except Exception as exc:  # last-resort guard keeps the session alive
+        output_func(f"Error: unexpected failure while processing the query: {exc}")
+        return False
+
+    output_func(report.content)
+    if args.output_file:
+        try:
+            export_report(report, args.output_file)
+            output_func(f"Result exported to {args.output_file}")
+        except OSError as exc:
+            output_func(f"Error: could not write output file: {exc}")
+            return False
+    return True
+
+
+def run_query_loop(service: RouteService, args, input_func=input, output_func=print) -> int:
+    """Run the continuous query loop until the user quits."""
+    output_func("Beijing Subway Fare Calculator. Type 'quit' to exit.")
+    while True:
+        try:
+            raw = input_func(PROMPT)
+        except (EOFError, KeyboardInterrupt):
+            output_func("")
+            break
+        text = raw.strip()
+        if not text:
+            continue
+        if text.lower() in EXIT_WORDS:
+            break
+        handle_query(service, text, args, output_func)
+    return 0
+
+
+def main(argv=None, input_func=input, output_func=print) -> int:
+    """Program entry point. Returns the process exit code."""
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        data = load_subway_data(DATA_FILE_PATH)
+        network = SubwayNetwork(data)
+    except (OSError, ValueError) as exc:
+        output_func(f"Error: failed to load subway data: {exc}")
+        return 1
+
+    if args.check_data:
+        report = network.check_integrity()
+        output_func("Data integrity check: " + ("PASSED" if report.passed else "FAILED"))
+        for issue in report.issues:
+            output_func(f"  - {issue}")
+        return 0 if report.passed else 1
+
+    if args.line_preference and args.line_preference not in network.line_names():
+        output_func(f"Error: line preference '{args.line_preference}' does not exist in the network")
+        return 2
+
+    service = RouteService(network)
+    return run_query_loop(service, args, input_func, output_func)
+</file>
+
+<file path="src/main.py">
+"""Entry point of the Beijing Subway fare calculation system.
+
+Run from any directory with:
+    python src/main.py [--output_file PATH] [--format text|json]
+                       [--mode shortest_distance|least_transfer|comprehensive]
+                       [--max_transfers N] [--line_preference "Line 1"]
+                       [--check_data]
+"""
+
+import os
+import sys
+
+# Make the sibling modules importable regardless of the working directory.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())
+</file>

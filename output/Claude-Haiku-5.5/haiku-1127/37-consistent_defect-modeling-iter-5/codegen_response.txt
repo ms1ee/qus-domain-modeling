@@ -1,0 +1,872 @@
+<file path="src/lottery_system/__init__.py">
+"""Company team building smart lottery system."""
+</file>
+
+<file path="src/lottery_system/__main__.py">
+"""Entry point: python -m lottery_system (run from the src directory)."""
+from lottery_system.cli import main
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="src/lottery_system/models.py">
+"""Core data models for the lottery system."""
+from dataclasses import dataclass, field
+from typing import Optional
+
+# Special lottery person names and department names referenced by the rule engine.
+LI_BIN = "Li Bin"
+CHEN_QIXIAN = "Chen Qixian"
+JIN_DUO = "Jin Duo"
+MA_JIAQI = "Ma Jiaqi"
+CHENG_RU_GROUP = "Cheng Ru group"
+
+
+@dataclass(frozen=True)
+class User:
+    """A participant of the team building event."""
+    name: str
+    department: str
+
+
+@dataclass
+class Prize:
+    """A prize that can be drawn in a lottery round.
+
+    avoid_groups: department groups whose members are drawn only after other members.
+    associated_drawer: the lottery person bound to this prize (or None).
+    level: prize level, higher value means higher prize (0 for custom prizes).
+    """
+    name: str
+    quantity: int
+    avoid_groups: list[str] = field(default_factory=list)
+    associated_drawer: Optional[str] = None
+    level: int = 0
+</file>
+
+<file path="src/lottery_system/data.py">
+"""Built-in default data: team building participant list and preset prizes."""
+
+# Format: "Name,Department Group" (a semicolon is also accepted as separator).
+DEFAULT_PARTICIPANT_LINES = (
+    "Chen Qixian,Cheng Ru group",
+    "Jin Duo,Product Department",
+    "Ma Jiaqi,Technology Department",
+    "Li Bin,Marketing Department",
+    "Zhang San,Technology Department",
+    "Li Si,Technology Department",
+    "Wang Wu,Technology Department",
+    "Zhao Liu,Product Department",
+    "Sun Qi,Product Department",
+    "Zhou Ba,Product Department",
+    "Wu Jiu,Cheng Ru group",
+    "Zheng Shi,Cheng Ru group",
+    "Feng Yi,Cheng Ru group",
+    "Chu Er,Cheng Ru group",
+    "Wei San,Marketing Department",
+    "Shen Si,Marketing Department",
+    "Han Wu,Human Resources Department",
+    "Yang Liu,Human Resources Department",
+    "Zhu Qi,Finance Department",
+    "Xu Ba,Finance Department",
+    "Lu Jiu,Finance Department",
+    "He Shi,Customer Service Department",
+    "Gao Yi,Customer Service Department",
+    "Lin Er,Customer Service Department",
+)
+
+# (prize name, quantity, level) -- level: higher value means higher prize.
+DEFAULT_PRIZES = (
+    ("Third Prize - Movie Tickets", 5, 1),
+    ("Second Prize - Shopping Cards", 3, 2),
+    ("First Prize - 1 Day Annual Leave", 1, 3),
+)
+</file>
+
+<file path="src/lottery_system/input_reader.py">
+"""Background stdin reader so that commands can be detected during a draw."""
+import queue
+import sys
+import threading
+from typing import Optional
+
+
+class InputReader:
+    """Reads stdin lines in a daemon thread and hands them out via a queue.
+
+    read_line() blocks until a line is available (used for menus).
+    poll() waits up to a timeout and returns None if nothing was typed
+    (used to detect 'pause', 'continue' and 'terminate' during a draw).
+    Both raise EOFError when the input stream is closed.
+    """
+
+    def __init__(self, stream=None):
+        self._stream = stream if stream is not None else sys.stdin
+        self._queue: queue.Queue = queue.Queue()
+        self._thread: Optional[threading.Thread] = None
+        self._eof = False
+
+    def start(self) -> None:
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._pump, name="stdin-reader", daemon=True)
+            self._thread.start()
+
+    def _pump(self) -> None:
+        while True:
+            try:
+                line = self._stream.readline()
+            except (OSError, ValueError):
+                line = ""
+            if line == "":
+                self._queue.put(None)
+                return
+            self._queue.put(line.rstrip("\r\n"))
+
+    def read_line(self, prompt: str = "") -> str:
+        if prompt:
+            print(prompt, end="", flush=True)
+        if self._eof:
+            raise EOFError
+        self.start()
+        item = self._queue.get()
+        if item is None:
+            self._eof = True
+            raise EOFError
+        return item.strip()
+
+    def poll(self, timeout: float) -> Optional[str]:
+        if self._eof:
+            raise EOFError
+        self.start()
+        try:
+            item = self._queue.get(timeout=max(timeout, 0))
+        except queue.Empty:
+            return None
+        if item is None:
+            self._eof = True
+            raise EOFError
+        return item.strip().lower()
+</file>
+
+<file path="src/lottery_system/services/__init__.py">
+"""Service layer of the lottery system."""
+</file>
+
+<file path="src/lottery_system/services/list_manager.py">
+"""Participant list loading, validation and department group extraction."""
+import re
+from lottery_system.data import DEFAULT_PARTICIPANT_LINES
+from lottery_system.models import User
+
+_SEPARATOR = re.compile(r"[,;]")
+
+LOAD_MODE_DEFAULT = "default"
+LOAD_MODE_CUSTOM = "custom"
+
+
+class ListManager:
+    def __init__(self):
+        self.load_mode = None
+        self.source_file_path = None
+        self.is_valid = False
+
+    def load_default_list(self):
+        """Load the built-in team building list. Returns (users, errors)."""
+        users, errors = self._parse_lines(DEFAULT_PARTICIPANT_LINES)
+        self._update_state(LOAD_MODE_DEFAULT, None, users, errors)
+        return users, errors
+
+    def load_custom_list(self, path):
+        """Load a custom txt list from path. Returns (users, errors)."""
+        users, errors = self._load_from_path(path)
+        self._update_state(LOAD_MODE_CUSTOM, path, users, errors)
+        return users, errors
+
+    def _load_from_path(self, path):
+        """Read and parse a txt file. Returns (users, errors)."""
+        try:
+            with open(path, "r", encoding="utf-8-sig") as handle:
+                content = handle.read()
+        except (OSError, UnicodeDecodeError) as exc:
+            return [], [f"File Error: cannot read '{path}' ({exc})"]
+        return self._parse_lines(content.splitlines())
+
+    def _parse_lines(self, lines):
+        users = []
+        errors = []
+        for line_no, raw in enumerate(lines, start=1):
+            line = raw.strip()
+            if not line:
+                continue
+            parts = [part.strip() for part in _SEPARATOR.split(line)]
+            if len(parts) != 2 or not parts[0] or not parts[1]:
+                errors.append(
+                    f"Line {line_no}: Format Error - expected 'Name,Department Group' but got '{line}'"
+                )
+                continue
+            users.append(User(name=parts[0], department=parts[1]))
+        return users, errors
+
+    def _update_state(self, mode, path, users, errors):
+        self.load_mode = mode
+        self.source_file_path = path
+        self.is_valid = not errors and bool(users)
+
+    def validate_users(self, users):
+        """Split users into (valid_users, duplicates).
+
+        The first occurrence of a name is valid; later occurrences are duplicates.
+        """
+        seen = set()
+        valid_users = []
+        duplicates = []
+        for user in users:
+            key = user.name.strip()
+            if key in seen:
+                duplicates.append(user)
+            else:
+                seen.add(key)
+                valid_users.append(user)
+        return valid_users, duplicates
+
+    def get_group_info(self, users):
+        """Return a mapping of department group name to number of members."""
+        counts = {}
+        for user in users:
+            counts[user.department] = counts.get(user.department, 0) + 1
+        return counts
+</file>
+
+<file path="src/lottery_system/services/prize_manager.py">
+"""Prize library management: preset prizes, custom prizes, avoidance groups and ordering."""
+from lottery_system.data import DEFAULT_PRIZES
+from lottery_system.models import Prize
+
+
+class PrizeManager:
+    def __init__(self):
+        self._prizes = []
+        self._default_loaded = False
+
+    def load_default_prizes(self):
+        """Add the preset prize library. Returns a list of error messages."""
+        if self._default_loaded:
+            return ["Preset prizes have already been loaded"]
+        for name, quantity, level in DEFAULT_PRIZES:
+            self._prizes.append(Prize(name=name, quantity=quantity, level=level))
+        self._default_loaded = True
+        return []
+
+    def add_prize(self, name, quantity, avoid_groups=None, associated_drawer=None):
+        """Add a custom prize at the end of the lottery sequence and return it."""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Prize name must not be empty")
+        if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity < 1:
+            raise ValueError("Prize quantity must be a positive integer")
+        if any(prize.name == name for prize in self._prizes):
+            raise ValueError(f"A prize named '{name}' already exists")
+        groups = []
+        for group in avoid_groups or []:
+            group = (group or "").strip()
+            if group and group not in groups:
+                groups.append(group)
+        drawer = (associated_drawer or "").strip() or None
+        prize = Prize(name=name, quantity=quantity, avoid_groups=groups,
+                      associated_drawer=drawer, level=0)
+        self._prizes.append(prize)
+        return prize
+
+    def get_prizes(self):
+        """Return prizes in current lottery sequence."""
+        return list(self._prizes)
+
+    def set_avoid_groups(self, index, groups):
+        """Replace the avoidance groups of the prize at 0-based index."""
+        prize = self._prizes[index]
+        cleaned = []
+        for group in groups or []:
+            group = (group or "").strip()
+            if group and group not in cleaned:
+                cleaned.append(group)
+        prize.avoid_groups = cleaned
+
+    def set_associated_drawer(self, index, drawer):
+        """Set the associated lottery person of the prize at 0-based index (None clears)."""
+        prize = self._prizes[index]
+        prize.associated_drawer = (drawer or "").strip() or None
+
+    def reorder_prizes(self, order):
+        """Reorder prizes. order holds 1-based current positions in the new order."""
+        count = len(self._prizes)
+        if not isinstance(order, list) or len(order) != count:
+            return False
+        if sorted(order) != list(range(1, count + 1)):
+            return False
+        self._prizes = [self._prizes[position - 1] for position in order]
+        return True
+</file>
+
+<file path="src/lottery_system/services/lottery_manager.py">
+"""Lottery rule engine: eligibility filtering, special rules, fallback and anti-duplication."""
+import random
+from lottery_system.models import (
+    CHEN_QIXIAN,
+    CHENG_RU_GROUP,
+    JIN_DUO,
+    LI_BIN,
+    MA_JIAQI,
+    Prize,
+    User,
+)
+
+
+def _norm(value):
+    return (value or "").strip().casefold()
+
+
+def _is_drawer(prize, drawer_name):
+    return prize.associated_drawer is not None and _norm(prize.associated_drawer) == _norm(drawer_name)
+
+
+def _is_cheng_ru(user):
+    return _norm(user.department) == _norm(CHENG_RU_GROUP)
+
+
+class LotteryManager:
+    def __init__(self, users, rng=None):
+        self._users = list(users)
+        self._rng = rng if rng is not None else random.Random()
+        self._winner_keys = set()
+        self._winners = []
+        # True means the draw by Chen Qixian / Jin Duo produced a Cheng Ru group member.
+        self.last_two_draw_results = []
+
+    @property
+    def winners(self):
+        return list(self._winners)
+
+    def is_winner(self, user):
+        return _norm(user.name) in self._winner_keys
+
+    def remaining_count(self):
+        return len(self._available_users())
+
+    def _available_users(self):
+        return [user for user in self._users if not self.is_winner(user)]
+
+    def _cheng_ru_protection_active(self):
+        return len(self.last_two_draw_results) == 2 and not any(self.last_two_draw_results)
+
+    def _get_eligible_pool(self, prize: Prize) -> list[User]:
+        available = self._available_users()
+
+        # Special rule: Li Bin only filters previous winners.
+        if _is_drawer(prize, LI_BIN):
+            return available
+
+        # Fallback: Ma Jiaqi's pool is forced to Cheng Ru group members when the
+        # two previous Chen Qixian / Jin Duo draws both had no Cheng Ru group winner.
+        if _is_drawer(prize, MA_JIAQI) and self._cheng_ru_protection_active():
+            protected = [user for user in available if _is_cheng_ru(user)]
+            if protected:
+                return protected
+
+        # Avoidance groups: their members stay eligible but are drawn after others.
+        avoid = {_norm(group) for group in prize.avoid_groups if group and group.strip()}
+        preferred = [user for user in available if _norm(user.department) not in avoid]
+        if preferred:
+            return preferred
+        return [user for user in available if _norm(user.department) in avoid]
+
+    def _record_draw(self, prize, user):
+        if _is_drawer(prize, CHEN_QIXIAN) or _is_drawer(prize, JIN_DUO):
+            self.last_two_draw_results.append(_is_cheng_ru(user))
+            self.last_two_draw_results = self.last_two_draw_results[-2:]
+
+    def draw_one(self, prize: Prize):
+        """Draw one winner for the prize. Returns the User, or None if nobody is eligible."""
+        pool = self._get_eligible_pool(prize)
+        if not pool:
+            return None
+        user = self._rng.choice(pool)
+        self._winner_keys.add(_norm(user.name))
+        self._winners.append(user)
+        self._record_draw(prize, user)
+        return user
+
+
+def describe_rules(prize: Prize) -> str:
+    """Human readable description of the rules applied to a prize round."""
+    parts = []
+    if prize.associated_drawer:
+        parts.append(f"Lottery person: {prize.associated_drawer}")
+    parts.append("previous winners are excluded")
+    if _is_drawer(prize, LI_BIN):
+        parts.append("special rule for Li Bin: avoidance groups are not applied")
+    else:
+        if prize.avoid_groups:
+            parts.append(
+                "members of avoidance groups (" + ", ".join(prize.avoid_groups)
+                + ") are drawn after other members"
+            )
+        if _is_drawer(prize, MA_JIAQI):
+            parts.append(
+                "Cheng Ru group protection: if the last two draws by Chen Qixian and Jin Duo "
+                "both had no Cheng Ru group member, the draw is limited to Cheng Ru group members"
+            )
+    return "; ".join(parts)
+</file>
+
+<file path="src/lottery_system/services/result_manager.py">
+"""Winner records, grouped results and CSV export."""
+import csv
+import os
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from lottery_system.models import Prize, User
+
+
+@dataclass
+class Winner:
+    user: User
+    prize: Prize
+    winning_order: int = 0
+    winning_time: datetime = field(default_factory=datetime.now)
+
+
+def _sorted_prizes(prizes):
+    """Prizes ordered from highest level to lowest (stable for equal levels)."""
+    return sorted(prizes, key=lambda prize: prize.level, reverse=True)
+
+
+class ResultManager:
+    def __init__(self):
+        self._winners = []
+
+    def add_winner(self, user, prize):
+        winner = Winner(user=user, prize=prize,
+                        winning_order=len(self._winners) + 1,
+                        winning_time=datetime.now())
+        self._winners.append(winner)
+        return winner
+
+    def get_winners(self):
+        return list(self._winners)
+
+    def get_winners_by_prize(self, prizes):
+        """Return {prize name: [Winner, ...]} ordered by prize level (high to low),
+        with winners within each prize in winning order."""
+        result = {}
+        for prize in _sorted_prizes(prizes):
+            result[prize.name] = [w for w in self._winners if w.prize.name == prize.name]
+        return result
+
+    def export_to_csv(self, prizes):
+        """Export the winner list to awards_result_YYYYMMDD.txt in the current directory."""
+        filename = f"awards_result_{datetime.now():%Y%m%d}.txt"
+        path = os.path.join(os.getcwd(), filename)
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["Name", "Department", "Prize Name", "Winning Time"])
+                for prize_name, winners in self.get_winners_by_prize(prizes).items():
+                    for winner in winners:
+                        writer.writerow([
+                            winner.user.name,
+                            winner.user.department,
+                            prize_name,
+                            winner.winning_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        ])
+        except OSError as exc:
+            return False, f"Export failed: {exc}"
+        return True, f"Winner list successfully exported to {path}"
+</file>
+
+<file path="src/lottery_system/cli.py">
+"""Command-line interface: menus, list/prize configuration, lottery process control and results."""
+from lottery_system.input_reader import InputReader
+from lottery_system.services.list_manager import ListManager
+from lottery_system.services.lottery_manager import LotteryManager, describe_rules
+from lottery_system.services.prize_manager import PrizeManager
+from lottery_system.services.result_manager import ResultManager
+
+DEFAULT_DRAW_INTERVAL = 1.5
+
+
+def ordinal(number):
+    if 10 <= number % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+    return f"{number}{suffix}"
+
+
+class LotteryApp:
+    def __init__(self, reader=None, draw_interval=DEFAULT_DRAW_INTERVAL):
+        self.reader = reader if reader is not None else InputReader()
+        self.draw_interval = draw_interval
+        self.list_manager = ListManager()
+        self.prize_manager = PrizeManager()
+        self.users = []
+        self.last_results = None
+        self.last_prizes = None
+
+    # ------------------------------------------------------------------ main loop
+    def run(self):
+        self.reader.start()
+        print("=== Company Team Building Smart Lottery System ===")
+        try:
+            while True:
+                self._print_main_menu()
+                choice = self.reader.read_line("Select an option: ")
+                if choice == "1":
+                    self._load_default_list()
+                elif choice == "2":
+                    self._upload_custom_list()
+                elif choice == "3":
+                    self._show_groups()
+                elif choice == "4":
+                    self._prize_menu()
+                elif choice == "5":
+                    self._start_lottery()
+                elif choice == "6":
+                    self._export_results()
+                elif choice == "0":
+                    break
+                else:
+                    print("Invalid option, please try again.")
+        except EOFError:
+            print("\nInput closed. Exiting.")
+        print("Goodbye!")
+
+    def _print_main_menu(self):
+        print("\n----- Main Menu -----")
+        print("1. Load built-in team building list")
+        print("2. Upload custom participant list (txt)")
+        print("3. View department groups and member counts")
+        print("4. Prize configuration")
+        print("5. Start lottery")
+        print("6. Export winner list")
+        print("0. Exit")
+
+    # ------------------------------------------------------------ list management
+    def _load_default_list(self):
+        users, errors = self.list_manager.load_default_list()
+        self._finalize_list(users, errors)
+
+    def _upload_custom_list(self):
+        path = self.reader.read_line("Enter the path of the txt file: ").strip().strip('"')
+        if not path:
+            print("Upload cancelled.")
+            return
+        users, errors = self.list_manager.load_custom_list(path)
+        self._finalize_list(users, errors)
+
+    def _finalize_list(self, users, errors):
+        if errors:
+            print(f"{len(errors)} problem(s) found in the list:")
+            for error in errors:
+                print(f"  {error}")
+
+        valid, duplicates = self.list_manager.validate_users(users)
+        if duplicates:
+            print(f"{len(duplicates)} duplicate name(s) found:")
+            for user in duplicates:
+                print(f"  Duplicate: {user.name} ({user.department})")
+
+        if not valid and not errors and not duplicates:
+            print("The list contains no participants; nothing was loaded.")
+            return
+
+        if errors or duplicates:
+            print("How do you want to handle the invalid data?")
+            print("  1. remove     - discard invalid lines and duplicate names, keep the rest")
+            print("  2. manual     - keep the rest and manually remove specific names")
+            print("  3. terminate  - abort the upload")
+            while True:
+                choice = self.reader.read_line("Enter 1/2/3: ").strip().lower()
+                if choice in ("1", "remove"):
+                    break
+                if choice in ("2", "manual"):
+                    valid = self._manual_remove(valid)
+                    break
+                if choice in ("3", "terminate"):
+                    print("Upload terminated; the participant list is unchanged.")
+                    return
+                print("Please enter 1, 2 or 3.")
+
+        if not valid:
+            print("No participants left after removal; nothing was loaded.")
+            return
+
+        self.users = valid
+        print(f"Loaded {len(valid)} participants.")
+        self._show_groups()
+
+    def _manual_remove(self, users):
+        current = list(users)
+        print("Enter a name to remove, or press Enter to finish.")
+        while True:
+            name = self.reader.read_line("Remove name: ").strip()
+            if not name:
+                break
+            before = len(current)
+            current = [user for user in current if user.name != name]
+            removed = before - len(current)
+            if removed:
+                print(f"Removed {removed} entry(ies) for {name}.")
+            else:
+                print("No participant with that name.")
+        return current
+
+    def _show_groups(self):
+        if not self.users:
+            print("No participant list loaded.")
+            return
+        info = self.list_manager.get_group_info(self.users)
+        print("Department groups:")
+        for department, count in info.items():
+            print(f"  {department}: {count} people")
+        print(f"Total participants: {len(self.users)}")
+
+    def _group_names(self):
+        if not self.users:
+            return []
+        return list(self.list_manager.get_group_info(self.users).keys())
+
+    def _parse_groups(self, text, groups):
+        result = []
+        for token in [t.strip() for t in text.split(",") if t.strip()]:
+            if token.isdigit() and 1 <= int(token) <= len(groups):
+                name = groups[int(token) - 1]
+            else:
+                name = token
+            if name not in result:
+                result.append(name)
+        return result
+
+    # ------------------------------------------------------------ prize configuration
+    def _prize_menu(self):
+        while True:
+            self._print_prizes()
+            print("\n----- Prize Configuration -----")
+            print("1. Load preset prize library")
+            print("2. Add custom prize")
+            print("3. Set avoidance groups for a prize")
+            print("4. Set associated lottery person for a prize")
+            print("5. Reorder lottery sequence")
+            print("0. Back")
+            choice = self.reader.read_line("Select an option: ")
+            if choice == "1":
+                self._load_presets()
+            elif choice == "2":
+                self._add_custom_prize()
+            elif choice == "3":
+                self._set_avoid_groups()
+            elif choice == "4":
+                self._set_drawer()
+            elif choice == "5":
+                self._reorder_prizes()
+            elif choice == "0":
+                return
+            else:
+                print("Invalid option, please try again.")
+
+    def _print_prizes(self):
+        prizes = self.prize_manager.get_prizes()
+        if not prizes:
+            print("\nNo prizes configured yet.")
+            return
+        print("\nCurrent lottery sequence:")
+        for index, prize in enumerate(prizes, start=1):
+            avoid = ", ".join(prize.avoid_groups) or "none"
+            drawer = prize.associated_drawer or "none"
+            print(f"  {index}. {prize.name} | quantity: {prize.quantity} | "
+                  f"avoid groups: {avoid} | lottery person: {drawer}")
+
+    def _load_presets(self):
+        errors = self.prize_manager.load_default_prizes()
+        if errors:
+            for error in errors:
+                print(error)
+        else:
+            print("Preset prizes loaded.")
+
+    def _ask_positive_int(self, prompt):
+        while True:
+            text = self.reader.read_line(prompt).strip()
+            try:
+                value = int(text)
+                if value > 0:
+                    return value
+            except ValueError:
+                pass
+            print("Please enter a positive integer.")
+
+    def _add_custom_prize(self):
+        name = self.reader.read_line("Prize name: ").strip()
+        if not name:
+            print("Prize creation cancelled.")
+            return
+        quantity = self._ask_positive_int("Quantity: ")
+        drawer = self.reader.read_line("Associated lottery person (Enter to skip): ").strip() or None
+        groups = self._group_names()
+        avoid = []
+        if groups:
+            print("Department groups:")
+            for index, group in enumerate(groups, start=1):
+                print(f"  {index}. {group}")
+            text = self.reader.read_line(
+                "Avoidance groups (numbers or names, comma-separated; Enter to skip): ")
+            avoid = self._parse_groups(text, groups)
+        try:
+            prize = self.prize_manager.add_prize(name, quantity, avoid, drawer)
+            print(f"Prize added: {prize.name}")
+        except ValueError as exc:
+            print(f"Failed to add prize: {exc}")
+
+    def _select_prize(self, prompt):
+        prizes = self.prize_manager.get_prizes()
+        if not prizes:
+            print("No prizes configured yet.")
+            return None
+        text = self.reader.read_line(prompt).strip()
+        if text.isdigit() and 1 <= int(text) <= len(prizes):
+            return int(text) - 1
+        print("Invalid prize number.")
+        return None
+
+    def _set_avoid_groups(self):
+        index = self._select_prize("Select prize number: ")
+        if index is None:
+            return
+        groups = self._group_names()
+        if groups:
+            print("Department groups:")
+            for number, group in enumerate(groups, start=1):
+                print(f"  {number}. {group}")
+        text = self.reader.read_line(
+            "Avoidance groups (numbers or names, comma-separated; Enter to clear): ")
+        self.prize_manager.set_avoid_groups(index, self._parse_groups(text, groups))
+        print("Avoidance groups updated.")
+
+    def _set_drawer(self):
+        index = self._select_prize("Select prize number: ")
+        if index is None:
+            return
+        drawer = self.reader.read_line("Associated lottery person (Enter to clear): ").strip()
+        self.prize_manager.set_associated_drawer(index, drawer or None)
+        print("Associated lottery person updated.")
+
+    def _reorder_prizes(self):
+        prizes = self.prize_manager.get_prizes()
+        if not prizes:
+            print("No prizes configured yet.")
+            return
+        count = len(prizes)
+        text = self.reader.read_line(
+            f"Enter the new order as serial numbers separated by spaces (1-{count}): ")
+        try:
+            order = [int(token) for token in text.split()]
+        except ValueError:
+            print("Invalid input: please enter serial numbers only.")
+            return
+        if self.prize_manager.reorder_prizes(order):
+            print("Lottery sequence updated.")
+            self._print_prizes()
+        else:
+            print(f"Invalid order: each serial number from 1 to {count} must appear exactly once.")
+
+    # ------------------------------------------------------------ lottery process
+    def _start_lottery(self):
+        if not self.users:
+            print("Please load a participant list first.")
+            return
+        prizes = self.prize_manager.get_prizes()
+        if not prizes:
+            print("Please configure prizes first.")
+            return
+
+        lottery = LotteryManager(self.users)
+        results = ResultManager()
+        print("\nLottery starting. During the draw you may type: pause / continue / terminate")
+        for round_no, prize in enumerate(prizes, start=1):
+            print(f"\n=== Round {round_no}: {prize.name} ===")
+            print(f"Quantity: {prize.quantity}")
+            print(f"Rules: {describe_rules(prize)}")
+            round_winners = self._run_round(lottery, results, prize)
+            print(f"--- Round {round_no} results ---")
+            if not round_winners:
+                print("  No winners in this round.")
+            for winner in round_winners:
+                print(f"  {winner.winning_order}. {winner.user.name} ({winner.user.department})")
+
+        self.last_results = results
+        self.last_prizes = prizes
+        self._print_summary(results, prizes)
+
+    def _run_round(self, lottery, results, prize):
+        winners = []
+        drawn = 0
+        while drawn < prize.quantity:
+            command = self.reader.poll(self.draw_interval)
+            if command == "pause":
+                if self._wait_while_paused() == "terminate":
+                    print("Round terminated. Remaining draws for this prize are skipped.")
+                    break
+            elif command == "terminate":
+                print("Round terminated. Remaining draws for this prize are skipped.")
+                break
+            elif command == "continue":
+                print("Lottery is not paused.")
+
+            print(f"Currently drawing the {ordinal(drawn + 1)} winner...")
+            user = lottery.draw_one(prize)
+            if user is None:
+                print("No eligible participants remain for this prize; the round ends early.")
+                break
+            drawn += 1
+            winner = results.add_winner(user, prize)
+            winners.append(winner)
+            print(f"Congratulations {user.name} ({user.department}) for winning {prize.name}!")
+        return winners
+
+    def _wait_while_paused(self):
+        print("Lottery paused. Type 'continue' to resume or 'terminate' to end this round.")
+        while True:
+            command = self.reader.read_line("").strip().lower()
+            if command == "continue":
+                print("Lottery resumed.")
+                return "continue"
+            if command == "terminate":
+                return "terminate"
+            print("Type 'continue' or 'terminate'.")
+
+    def _print_summary(self, results, prizes):
+        print("\n=== Final winner list (prize level from high to low) ===")
+        for prize_name, winners in results.get_winners_by_prize(prizes).items():
+            print(f"{prize_name}:")
+            if not winners:
+                print("  (no winners)")
+            for winner in winners:
+                print(f"  {winner.winning_order}. {winner.user.name} ({winner.user.department})")
+
+    # ------------------------------------------------------------ export
+    def _export_results(self):
+        if self.last_results is None:
+            print("No lottery has been run yet.")
+            return
+        _, message = self.last_results.export_to_csv(self.last_prizes)
+        print(message)
+
+
+def main():
+    app = LotteryApp()
+    try:
+        app.run()
+    except KeyboardInterrupt:
+        print("\nInterrupted. Exiting.")
+</file>
