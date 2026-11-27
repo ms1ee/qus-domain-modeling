@@ -154,8 +154,9 @@ def run_trial(llm, *, identity: dict, fixed: dict, run_dir: Path, max_repairs: i
             phase = 'applying'
             feedback = None
             if not response_complete(response, usage):
-                record['response_status'] = 'incomplete'
-                feedback = 'The last response was empty or truncated. Return complete file blocks; no partial files were applied.'
+                record['response_status'] = usage.get('response_status', 'incomplete')
+                feedback = usage.get('response_feedback') or (
+                    'The last response was empty or truncated. Return complete file blocks; no partial files were applied.')
             else:
                 try:
                     changes = parse_changes(response, current_files=files, protected_paths=protected)

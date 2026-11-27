@@ -3,6 +3,8 @@ import time
 from abc import ABC, abstractmethod
 from config import *
 from context import ContextBudgetError
+from model_output import (OUTPUT_FEEDBACK, api_error_details, capture_server_logs,
+                          classify_parser_error, completion_status)
 
 
 class LLM(ABC):
@@ -58,6 +60,7 @@ class LMStudio(LLM):
 
         self.profile = lmstudio_runtime.load_profile(model_id)
         base_url, self.model_id = lmstudio_runtime.connection(self.profile)
+        self.base_url = base_url
         self.runtime = lmstudio_runtime.Runtime(self.profile, base_url, self.model_id)
         self._refresh_runtime()
         api = self.profile['api']
@@ -87,6 +90,14 @@ class LMStudio(LLM):
                        top_p=sampling.pop('top_p'), seed=sampling.pop('seed'), extra_body=sampling)
         http_attempts = 0
         input_tokens = budget = None
+        def failed_usage():
+            return {
+                'model': self.model_id, 'http_attempts': http_attempts,
+                'retries': max(0, http_attempts - 1), 'response_complete': False,
+                'input_tokens': None, 'output_tokens': None, 'reasoning_tokens': None,
+                'cache_read_tokens': None, 'rendered_input_tokens': input_tokens,
+                'input_budget_tokens': budget, 'settings': self.settings,
+            }
         try:
             for attempt in range(api['max_retries'] + 1):
                 # Revalidate before every HTTP attempt, including after retry backoff.
@@ -99,10 +110,19 @@ class LMStudio(LLM):
                     raise ContextBudgetError(f'Input needs {input_tokens} tokens; context input budget is {budget}/{context}. '
                                      'PRD/domain model was not truncated. Prepare a larger context before retrying.')
                 try:
+                    log_cursor = capture_server_logs(self.base_url)
                     http_attempts += 1
                     message = self.client.chat.completions.create(**request)
                     break
                 except (openai.APIConnectionError, openai.APIStatusError) as error:
+                    details = classify_parser_error(error, log_cursor, self.model_id)
+                    if details is not None:
+                        usage = failed_usage()
+                        usage.update(response_status='protocol_error', stop_reason='protocol_error',
+                                     api_error=details,
+                                     response_feedback='LM Studio could not parse the last model output. ' + OUTPUT_FEEDBACK)
+                        print('  [LLM Warning] Model output protocol error; next request uses the repair budget', flush=True)
+                        return '', usage
                     status = getattr(error, 'status_code', None)
                     retryable = status is None or status in (408, 409, 429) or status >= 500
                     if not retryable or attempt == api['max_retries']:
@@ -113,13 +133,9 @@ class LMStudio(LLM):
                 raise RuntimeError('LM Studio returned no completion choices')
         except BaseException as error:
             # Known transport counts survive failures; server token usage is unknown.
-            error.request_usage = {
-                'model': self.model_id, 'http_attempts': http_attempts,
-                'retries': max(0, http_attempts - 1), 'response_complete': False,
-                'input_tokens': None, 'output_tokens': None, 'reasoning_tokens': None,
-                'cache_read_tokens': None, 'rendered_input_tokens': input_tokens,
-                'input_budget_tokens': budget, 'settings': self.settings,
-            }
+            error.request_usage = failed_usage()
+            if isinstance(error, (openai.APIConnectionError, openai.APIStatusError)):
+                error.request_usage['api_error'] = api_error_details(error)
             raise
         choice = message.choices[0]
         # Reasoning is not program output. Never concatenate reasoning_content.
@@ -129,7 +145,7 @@ class LMStudio(LLM):
             'model': message.model, 'request_id': getattr(message, '_request_id', None),
             'stop_reason': 'max_tokens' if choice.finish_reason == 'length' else choice.finish_reason,
             'finish_reason': choice.finish_reason,
-            'response_complete': choice.finish_reason == 'stop' and bool(text.strip()),
+            **completion_status(choice, text),
             'input_tokens': getattr(u, 'prompt_tokens', None),
             'output_tokens': getattr(u, 'completion_tokens', None),
             'cache_read_tokens': getattr(getattr(u, 'prompt_tokens_details', None), 'cached_tokens', None),
@@ -141,7 +157,7 @@ class LMStudio(LLM):
         print('  [LLM] stop_reason=%s in=%s out=%s' %
               (usage['stop_reason'], usage['input_tokens'], usage['output_tokens']))
         if not usage['response_complete']:
-            print('  [LLM Warning] Incomplete or empty answer; inspect usage.json before comparing scores')
+            print(f'  [LLM Warning] {usage["response_status"]}; no code applied from this response')
         return text, usage
 
 

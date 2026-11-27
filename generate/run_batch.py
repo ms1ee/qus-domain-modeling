@@ -242,6 +242,10 @@ def execute(plan):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--models', nargs='+', choices=LOCAL_MODELS, default=LOCAL_MODELS,
+                        help='Models to run in the supplied order (default: both models)')
+    parser.add_argument('--projects', nargs='+', choices=PROJECTS, default=PROJECTS,
+                        help='Projects to run in the supplied order (default: 37 44 29)')
     parser.add_argument('--pipeline', choices=['direct', 'modeling', 'both'], default='direct')
     parser.add_argument('--iters', type=int, default=1, help='Iterations per project/pipeline (default: 1)')
     parser.add_argument('--max-repairs', type=int, default=30,
@@ -249,6 +253,8 @@ def main(argv=None):
     parser.add_argument('--run-name', help='Fresh output directory name; generated automatically by default')
     parser.add_argument('--dry-run', action='store_true', help='Print plan only; no files, locks or model calls')
     args = parser.parse_args(argv)
+    if len(set(args.models)) != len(args.models) or len(set(args.projects)) != len(args.projects):
+        parser.error('duplicate model or project selections are not allowed')
     if args.iters < 1:
         parser.error('--iters must be positive')
     if not 0 <= args.max_repairs <= 30:
@@ -257,7 +263,7 @@ def main(argv=None):
                             + '_' + uuid.uuid4().hex[:8])
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}', name):
         parser.error('--run-name must be a simple directory name (letters, numbers, _, -, .)')
-    plan = {'run_name': name, 'models': LOCAL_MODELS, 'projects': PROJECTS,
+    plan = {'run_name': name, 'models': args.models, 'projects': args.projects,
             'pipelines': ['direct', 'modeling'] if args.pipeline == 'both' else [args.pipeline],
             'iters': args.iters, 'prd': 'vanilla', 'max_repairs': args.max_repairs}
     if args.dry_run:

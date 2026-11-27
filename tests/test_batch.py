@@ -92,6 +92,56 @@ CODE = '<file path="src/calculator.py">\ndef add(a,b):\n    return a+b\n</file>'
 DOMAIN = '{"classes": [{"name": "Calculator", "attributes": []}], "associations": []}'
 
 
+def test_selected_gptoss_batch_runs_only_44_then_29(batch_repo, endpoint):
+    repo, env = batch_repo
+    with endpoint([(200, completion(CODE))]) as (url, requests):
+        env['LMSTUDIO_API_BASE'] = url
+        result = execute(repo, env, '--models', 'gpt-oss-20b', '--projects', '44', '29')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(requests) == 2 and requests[0]['model'] != requests[1]['model']
+    assert all(r['reasoning_effort'] == 'high' and r['temperature'] == 1 for r in requests)
+    assert Path(env['FIXTURE_EVENTS']).read_text().splitlines() == [
+        'load openai/gpt-oss-20b', 'unload openai/gpt-oss-20b',
+        'load openai/gpt-oss-20b', 'unload openai/gpt-oss-20b']
+    batch = repo / 'output/batches/fixture'
+    status = json.loads((batch / 'status.json').read_text())
+    assert status['completed_jobs'] == [
+        {'model': 'gpt-oss-20b', 'task': '44', 'pipeline': 'direct'},
+        {'model': 'gpt-oss-20b', 'task': '29', 'pipeline': 'direct'}]
+    manifest = json.loads((batch / 'manifest.json').read_text())
+    assert manifest['models'] == ['gpt-oss-20b'] and manifest['projects'] == ['44', '29']
+    assert not (repo / 'output/Qwen3-Coder-30B').exists()
+    assert not (repo / 'output/gpt-oss-20b/fixture/37-vanilla-direct-iter-0').exists()
+
+
+def test_batch_recovers_parser_error_and_continues_to_next_project(batch_repo, endpoint):
+    repo, env = batch_repo
+    parser_error = {'error': {'message': 'The model produced output that does not match the expected peg-native format'}}
+    with endpoint([(400, parser_error), (200, completion(CODE))]) as (url, requests):
+        env['LMSTUDIO_API_BASE'] = url
+        result = execute(repo, env, '--models', 'gpt-oss-20b', '--projects', '44', '29', '--max-repairs', '1')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(requests) == 3
+    assert requests[0]['model'] == requests[1]['model'] != requests[2]['model']
+    assert 'LM Studio could not parse the last model output.' in requests[1]['messages'][0]['content']
+    directory = repo / 'output/gpt-oss-20b/fixture/44-vanilla-direct-iter-0'
+    state = json.loads((directory / 'run.json').read_text())
+    assert state['status'] == 'passed' and state['repairs_used'] == 1
+    first = json.loads((directory / 'rounds/000/record.json').read_text())
+    assert first['response_status'] == 'protocol_error' and first['validation'] is None
+    assert first['usage']['api_error']['http_status'] == 400
+    status = json.loads((repo / 'output/batches/fixture/status.json').read_text())
+    assert status['status'] == 'completed' and len(status['completed_jobs']) == 2
+
+
+@pytest.mark.parametrize('args', [('--models', 'gpt-oss-20b', 'gpt-oss-20b'), ('--projects', '44', '44')])
+def test_duplicate_selected_jobs_rejected_before_model_work(batch_repo, args):
+    repo, env = batch_repo
+    result = execute(repo, env, *args)
+    assert result.returncode != 0 and 'duplicate' in result.stderr.lower()
+    assert not (repo / 'output').exists()
+
+
 @pytest.mark.parametrize('pipeline,rows', [('direct', 6), ('both', 12)])
 def test_full_batch_orders_models_and_generates_evaluates_records_results(batch_repo, endpoint, pipeline, rows):
     repo, env = batch_repo

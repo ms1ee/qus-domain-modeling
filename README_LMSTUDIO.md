@@ -206,6 +206,15 @@ PRD·도메인 모델·코드를 자르지 않고 `context_limit`으로 중단�
 현재 코드 해시와 일치하는 이전 검증이 있으면 그 결과를 유지한다. 최고 점수 코드로
 자동 복구하지 않고 최신 코드에서 다음 수정을 계속한다.
 
+LM Studio가 생성 출력을 파싱하지 못한 경우에는 `protocol_error`로 기록하고,
+도구 호출 없이 최종 답변에 파일 블록을 반환하도록 다음 요청에 피드백한다.
+이는 응답 본문에 정확한 `peg-native format` 오류가 있거나, 해당 요청 중 새로 기록된
+같은 모델 식별자의 서버 오류 로그로 확인된 HTTP 400/500에만 적용한다.
+빈 최종 답변은 `empty_response`, 제공하지 않은 도구 호출은 `unsupported_tool_call`로
+구분한다. 이런 응답은 적용하지 않으며 **최초 생성 + 최대 30회 수정 예산 안에서** 처리한다.
+서버가 토큰 사용량을 제공하지 않으면 `null`로 남긴다. 확인되지 않은 API 오류는
+기존 정책에 따라 재시도 또는 배치 중단하며, 모든 HTTP 400을 무시하지 않는다.
+
 프로젝트가 바뀌면 해당 배치가 로드한 모델을 해제하고 **새 식별자·새 인스턴스**로 로드한다.
 가중치는 동일한 학습 완료 파일을 다시 사용하며 재학습하지 않는다. LM Studio 서버나
 OS 파일 캐시를 재시작하는 것은 아니다. `both`의 두 방식과 `--iters`의 반복들은
@@ -215,6 +224,8 @@ OS 파일 캐시를 재시작하는 것은 아니다. `both`의 두 방식과 `-
 
 | 옵션 | 기본값 | 의미 |
 |---|---|---|
+| `--models MODEL ...` | `Qwen3-Coder-30B gpt-oss-20b` | 선택한 모델만 지정 순서대로 실행 |
+| `--projects ID ...` | `37 44 29` | 선택한 프로젝트만 지정 순서대로 실행. 중복 지정 불가 |
 | `--pipeline direct\|modeling\|both` | `direct` | 도메인 모델 없이 / 경유 / 두 방식 모두 |
 | `--iters N` | `1` | 모델·프로젝트·방식별 독립 실험 횟수. 1 이상 |
 | `--max-repairs N` | `30` | 최초 생성 이후 수정 요청 횟수. 0~30 |
@@ -230,10 +241,12 @@ OS 파일 캐시를 재시작하는 것은 아니다. `both`의 두 방식과 `-
 ./run_lmstudio.sh --max-repairs 0                         # 최초 생성만 평가
 ./run_lmstudio.sh --pipeline both --iters 3               # 36개 독립 실험
 ./run_lmstudio.sh --run-name baseline-01                  # 사용하지 않은 이름
+./run_lmstudio.sh --models gpt-oss-20b --projects 44 29    # gpt-oss 44부터 새로 실행, 29로 진행
 ```
 
 30회는 시간 제한이 아니다. 프로젝트별 실행 시간 상한이나 `--unlimited` 옵션은 없다.
-두 모델과 37·44·29 순서는 배치에 고정되어 있고, 모델·프로젝트 선택 옵션은 없다.
+모델·프로젝트 선택 옵션을 생략하면 기존처럼 두 모델을 각각 37·44·29 순서로 실행한다.
+선택 실행도 새 결과 폴더에서 최초 생성부터 시작하며, 이전 회차를 이어받는 기능은 아니다.
 
 ### 단일 모델·프로젝트만 수동 실행하기
 
@@ -317,11 +330,15 @@ skip, 테스트 수집 0건, import/수집 오류, timeout, 비정상 종료는 
 | `LMSTUDIO_API_BASE` | `http://127.0.0.1:1234/v1` |
 | `LMSTUDIO_API_KEY` | 서버에서 인증을 켰을 때 지정. HTTP와 SDK에 함께 사용 |
 | `LMSTUDIO_SDK_PATH` | 앞서 설명한 SDK `dist/index.mjs` 경로 |
+| `LMSTUDIO_SERVER_LOG_DIR` | `~/.lmstudio/server-logs`. 로컬 API의 불명확한 출력 파싱 오류를 확인할 로그 위치 |
 | `LMSTUDIO_QWEN_MODEL_ID` | 수동 실행 기본 `qus-prdbench-qwen` |
 | `LMSTUDIO_GPTOSS_MODEL_ID` | 수동 실행 기본 `qus-prdbench-gptoss` |
 
 `LMSTUDIO_*`는 셸 또는 루트 `.env`에서 지정할 수 있다. 배치는 프로젝트마다 모델 식별자를
 자동 생성하므로 마지막 두 변수는 수동 실행에 사용한다. 인증 키는 커밋하지 않는다.
+서버 로그 확인은 localhost·127.0.0.1·::1 API에서만 사용한다. 원격 API이거나 로그를
+읽을 수 없으면 응답 본문에서 확인된 파싱 오류만 복구한다. 오래된 로그나 다른 모델의
+오류는 복구 근거로 사용하지 않는다. 근거는 회차 `usage.json`의 `api_error`에 저장한다.
 
 | 현상 | 확인할 내용 |
 |---|---|
@@ -329,6 +346,7 @@ skip, 테스트 수집 0건, import/수집 오류, timeout, 비정상 종료는 
 | SDK helper 오류 | `node` 설치, SDK 경로, LM Studio 서버와 인증 설정 |
 | runtime mismatch | 모델 키·양자화·로드 설정이 프로필과 일치하는지 확인 |
 | `format_error` 반복 | `response.txt`, `record.json`. 중복 파일, 남는 파일 태그, 미완성 블록 등 확인 |
+| `protocol_error`, `empty_response`, `unsupported_tool_call` 반복 | 회차 `usage.json`의 `response_feedback`·`api_error` 확인. 다음 수정 요청으로 이어지지만 수정 예산을 소모함 |
 | 점수가 계속 같음 | 실패 지표와 실제 코드 변경을 확인. 동일 코드·형식 오류는 이전 검증을 유지할 수 있음 |
 | `context_limit` | `run.json`의 `error`와 회차 `record.json` 확인. `context.json`은 입력 구성에 성공한 회차에만 존재할 수 있음. 설정 변경은 실험 종료 후 새 실행으로 비교 |
 | `repair_limit` | 실행기 장애가 아니라 정해진 수정 예산 내 미통과 결과 |

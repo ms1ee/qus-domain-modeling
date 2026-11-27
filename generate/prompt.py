@@ -52,6 +52,8 @@ The following domain model was derived from the PRD. Use it as a reference for t
 """
 
 STATE_CODE_RULES = """Implement the Python 3.10 program specified by the PRD and Interface below using only the standard library.
+No tools are available: do not emit tool/function calls or request file browsing or shell execution. All inputs are provided below.
+Return source code in your final answer using the file blocks below; reasoning or a tool call is not an implementation.
 Follow module paths, class/function names, signatures, and return values exactly. Implement all functional requirements.
 The supplied tests, requirements, domain model and provided data are immutable. Do not write or weaken tests.
 The CurrentCode section is the complete CURRENT generated source, not a suggestion or an old conversation.
