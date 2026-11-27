@@ -44,6 +44,15 @@ python eval/evaluate.py Claude-Haiku-5.5 vanilla10-1124
 프로젝트마다 모델을 해제하고 새 인스턴스로 로드한다. 테스트 미통과 상태로 수정 예산을
 소진하면 결과를 저장하고 다음 프로젝트로 진행한다.
 
+`--feedback-level 1|2|3`으로 점수만 / 점수와 항목별 상태 / 상세 오류와 수정 이력을 선택한다.
+기본값은 3이다. `--iters 5`는 seed 42·43·44·45·46으로 독립 실험을 반복하며,
+`--seed-base`로 시작값을 바꿀 수 있다. 두 모델의 컨텍스트는 32,768,
+gpt-oss의 추론 강도는 medium이다.
+
+```bash
+./run_lmstudio.sh --feedback-level 1 --iters 3 --dry-run
+```
+
 입력은 기본 `vanilla`이며, `--prd`로 저장소에 포함된 결함 PRD 하나를 선택할 수 있다.
 
 ```bash

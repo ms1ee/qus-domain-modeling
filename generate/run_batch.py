@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from config import MODELS, ROOT_DIR
 from lmstudio_runtime import Runtime, connection, load_profile
 from tag_cleanup import POLICY as TAG_CLEANUP_POLICY
+from experiment import DEFAULT_SEED_BASE, seed_schedule, validate_feedback_level
 
 ROOT = Path(ROOT_DIR)
 LOCAL_MODELS = ['Qwen3-Coder-30B', 'gpt-oss-20b']
@@ -162,6 +163,9 @@ def validate_prd_inputs(plan):
 
 
 def execute(plan):
+    plan = {**plan, 'feedback_level': validate_feedback_level(plan.get('feedback_level', 3)),
+            'seed_base': plan.get('seed_base', DEFAULT_SEED_BASE)}
+    plan['seeds'] = seed_schedule(plan['seed_base'], plan['iters'])
     validate_prd_inputs(plan)
     batch = ROOT / 'output/batches' / plan['run_name']
     destinations = [batch] + [ROOT / 'output' / model / plan['run_name'] for model in plan['models']]
@@ -219,7 +223,9 @@ def execute(plan):
                                 stage(f'GENERATE {model}/{task}/{pipeline}')
                                 command = [sys.executable, '-u', str(ROOT / 'generate/generate.py'),
                                            model, task, plan['prd'], str(plan['iters']), plan['run_name'],
-                                           '--max-repairs', str(plan.get('max_repairs', 30))]
+                                           '--max-repairs', str(plan.get('max_repairs', 30)),
+                                           '--feedback-level', str(plan['feedback_level']),
+                                           '--seed-base', str(plan['seed_base'])]
                                 if pipeline == 'modeling':
                                     command.append('--modeling')
                                 run_command(command, env, batch / 'logs' / f'{label}.log', emit)
@@ -272,6 +278,10 @@ def main(argv=None):
     parser.add_argument('--iters', type=int, default=1, help='Iterations per project/pipeline (default: 1)')
     parser.add_argument('--max-repairs', type=int, default=30,
                         help='Repair requests after initial generation per trial (default: 30; 0 allowed)')
+    parser.add_argument('--feedback-level', type=int, choices=(1, 2, 3), default=3,
+                        help='1: score; 2: score and item outcomes; 3: detailed failures and history (default)')
+    parser.add_argument('--seed-base', type=int, default=DEFAULT_SEED_BASE,
+                        help='Independent repetition i uses base+i for both models (default: 42)')
     parser.add_argument('--run-name', help='Fresh output directory name; generated automatically by default')
     parser.add_argument('--dry-run', action='store_true', help='Print plan only; no files, locks or model calls')
     args = parser.parse_args(argv)
@@ -281,13 +291,18 @@ def main(argv=None):
         parser.error('--iters must be positive')
     if not 0 <= args.max_repairs <= 30:
         parser.error('--max-repairs must be between 0 and 30')
+    try:
+        seeds = seed_schedule(args.seed_base, args.iters)
+    except ValueError as error:
+        parser.error(str(error))
     name = args.run_name or ('lmstudio_' + datetime.now(ZoneInfo('Asia/Seoul')).strftime('%Y%m%d-%H%M%S')
                             + '_' + uuid.uuid4().hex[:8])
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}', name):
         parser.error('--run-name must be a simple directory name (letters, numbers, _, -, .)')
     plan = {'run_name': name, 'models': args.models, 'projects': args.projects,
             'pipelines': ['direct', 'modeling'] if args.pipeline == 'both' else [args.pipeline],
-            'iters': args.iters, 'prd': args.prd, 'max_repairs': args.max_repairs}
+            'iters': args.iters, 'prd': args.prd, 'max_repairs': args.max_repairs,
+            'feedback_level': args.feedback_level, 'seed_base': args.seed_base, 'seeds': seeds}
     if args.dry_run:
         try:
             validate_prd_inputs(plan)

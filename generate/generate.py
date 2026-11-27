@@ -5,12 +5,12 @@ import signal
 from dotenv import load_dotenv
 from config import *
 from prompt import *
-from llm import make_llm, request_completion
+from llm import LMStudio, make_llm, request_completion
 from artifacts import snapshot_hashes, write_json, ArtifactIntegrityError, source_digest
 from session import create_state
 from repair import run_trial, response_complete, finish_trial, evaluation
 from context import ContextBudgetError
-from experiment import validate_feedback_level
+from experiment import DEFAULT_SEED_BASE, iteration_seed, seed_schedule, validate_feedback_level
 
 load_dotenv(os.path.join(ROOT_DIR, ".env"))
 
@@ -47,17 +47,22 @@ def extract_files(response):
 
 
 def run_once(llm, task, prd, use_modeling, run_dir, *, max_repairs=30, prd_name='vanilla', nth=0,
-             feedback_level=3):
+             feedback_level=3, seed=None):
     validate_feedback_level(feedback_level)
     if not 0 <= max_repairs <= 30:
         raise ValueError('max_repairs must be between 0 and 30')
     run_dir = Path(run_dir)
     if run_dir.exists() and any(run_dir.iterdir()):
         raise FileExistsError(f'Trial directory is not empty; use a new run name: {run_dir}')
+    if isinstance(llm, LMStudio):
+        seed = iteration_seed(DEFAULT_SEED_BASE, nth) if seed is None else iteration_seed(seed, 0)
+        llm.set_seed(seed)
+    elif seed is not None:
+        raise ValueError('Explicit seed control is supported only for LM Studio models')
     benchmark = Path(BENCHMARK_DIR) / task
     inputs = snapshot_hashes(benchmark)
     identity = {'task': task, 'prd': prd_name, 'pipeline': 'modeling' if use_modeling else 'direct',
-                'iter': nth, 'feedback_level': feedback_level,
+                'iter': nth, 'feedback_level': feedback_level, 'seed': seed,
                 'model': getattr(llm, 'model_name', getattr(llm, 'model_id', type(llm).__name__))}
     state = create_state(run_dir, identity, max_repairs=max_repairs, inputs={'benchmark': inputs},
                          settings=getattr(llm, 'settings', {}))
@@ -130,6 +135,11 @@ def log_gen_info(outdir, args, llm):
                 % (args.task, args.prd, "modeling" if args.modeling else "direct", args.iters))
         f.write("Start Time: %d\n" % int(time.time()))
         f.write("Max repairs after initial generation: %d\n" % getattr(args, 'max_repairs', 30))
+        f.write("Feedback level: %d\n" % getattr(args, 'feedback_level', 3))
+        if isinstance(llm, LMStudio):
+            base = getattr(args, 'seed_base', None)
+            f.write("Seed schedule by independent iteration: %s\n" %
+                    seed_schedule(DEFAULT_SEED_BASE if base is None else base, args.iters))
         f.write("Commit Hash: %s\n\n" % commit)
 
 
@@ -142,9 +152,20 @@ def main():
     parser.add_argument("outdir", help="output/<model>/<outdir>")
     parser.add_argument("--modeling", action="store_true", help="PRD -> Modeling -> Code")
     parser.add_argument('--max-repairs', type=int, default=30, help='Repair requests after initial generation (default: 30)')
+    parser.add_argument('--feedback-level', type=int, choices=(1, 2, 3), default=3,
+                        help='1: score; 2: score and item outcomes; 3: detailed failures and history (default)')
+    parser.add_argument('--seed-base', type=int,
+                        help='LM Studio only: repetition i uses base+i (default: 42)')
     args = parser.parse_args()
     if not 0 <= args.max_repairs <= 30 or args.iters < 1:
         parser.error('--max-repairs must be between 0 and 30 and iters must be positive')
+    local = MODELS[args.model][0] == 'lmstudio'
+    if not local and args.seed_base is not None:
+        parser.error('--seed-base is supported only for LM Studio models')
+    try:
+        seeds = seed_schedule(DEFAULT_SEED_BASE if args.seed_base is None else args.seed_base, args.iters) if local else [None] * args.iters
+    except ValueError as error:
+        parser.error(str(error))
     def interrupt(signum, frame):
         raise KeyboardInterrupt
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
@@ -158,6 +179,8 @@ def main():
         prd = f.read()
 
     llm = make_llm(args.model)
+    if isinstance(llm, LMStudio):
+        llm.set_seed(seeds[0])
     outdir = os.path.join(OUTDIR_BASE, args.model, args.outdir)
     os.makedirs(outdir, exist_ok=True)
     log_gen_info(outdir, args, llm)
@@ -170,13 +193,15 @@ def main():
             previous = json.loads(state_path.read_text())
             if (previous['status'] in ('passed', 'repair_limit')
                     and previous['max_repairs'] == args.max_repairs
+                    and previous['identity'].get('feedback_level') == args.feedback_level
+                    and previous['identity'].get('seed') == seeds[i]
                     and evaluation.managed_result(run_dir)['status'] == previous['status']):
                 print('[*] Skip %s (%s)' % (run_dir, previous['status']))
                 continue
             raise RuntimeError('Existing trial is incomplete or differs from this request; use a new outdir: ' + run_dir)
         print("[*] Generating %s" % run_dir)
         state = run_once(llm, args.task, prd, args.modeling, run_dir, max_repairs=args.max_repairs,
-                         prd_name=args.prd, nth=i)
+                         prd_name=args.prd, nth=i, feedback_level=args.feedback_level, seed=seeds[i])
         if state['status'] not in ('passed', 'repair_limit'):
             raise SystemExit(1)
 

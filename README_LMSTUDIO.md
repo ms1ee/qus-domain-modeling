@@ -143,8 +143,8 @@ export LMSTUDIO_SDK_PATH="$PWD/.lmstudio-sdk/node_modules/@lmstudio/sdk/dist/ind
 | temperature | 0.7 | 1.0 |
 | top_p / top_k | 0.8 / 20 | 1.0 / 0 |
 | repeat_penalty / min_p | 1.05 / 0 | 1.0 / 0 |
-| seed | 42 | 42 |
-| reasoning_effort | 지정하지 않음 | high |
+| seed | 반복별 42, 43, 44, … | 반복별 42, 43, 44, … |
+| reasoning_effort | 지정하지 않음 | medium |
 
 공통 자원·요청 설정은 다음과 같다.
 
@@ -152,7 +152,7 @@ export LMSTUDIO_SDK_PATH="$PWD/.lmstudio-sdk/node_modules/@lmstudio/sdk/dist/ind
 |---|---|
 | CPU/GPU | MoE expert는 CPU, 나머지 레이어는 가능한 한 GPU에 배치 |
 | CPU 스레드 | 현재 서버의 모델별 기본값 10. 아래 설명 참고 |
-| 컨텍스트 | 65,536부터 로드. 메모리 부족 또는 로드 후 GPU 여유 768 MiB 미만일 때만 32,768로 재시도 |
+| 컨텍스트 | 두 모델 모두 32,768로 고정. 다른 크기의 기존 모델은 거절하며, 메모리 부족 또는 로드 후 GPU 여유 768 MiB 미만이면 중단 |
 | KV cache | GPU에 배치, F16, KV 양자화 비활성화 |
 | Flash Attention / 동시 예측 | 활성화 / 1개 |
 | 출력 상한 | API의 `max_tokens=-1`. 실제 출력은 컨텍스트와 모델의 종료 조건에 제한됨 |
@@ -161,7 +161,7 @@ export LMSTUDIO_SDK_PATH="$PWD/.lmstudio-sdk/node_modules/@lmstudio/sdk/dist/ind
 | 시간 제한 | API 연결 10초, 응답 대기 상한 없음. 테스트 명령마다 60초 |
 
 출력 여유 8,192는 입력을 너무 많이 넣지 않기 위한 예약량이며 **출력 길이의 상한은 아니다**.
-32,768 컨텍스트라면 입력 예산은 23,552토큰이다. 실제 로드값은 결과의
+두 모델의 입력 예산은 각각 23,552토큰이다. 실제 로드값은 결과의
 `*-runtime.json`에서 확인한다. 고정 시드도 하드웨어·런타임이 다르면 동일 출력을 보장하지 않는다.
 
 **CPU 스레드는 서버별 준비가 필요하다.** 프로필의 `runtime.cpu_threads=10`은 의도한
@@ -195,11 +195,26 @@ modeling: PRD → 도메인 모델 1회 생성·고정
 인터페이스는 [generate/config.py](generate/config.py)에 있는 모듈 경로·클래스·함수·인자 계약이다.
 코드 생성·수정에 제공하며, 도메인 모델 생성에는 PRD만 제공한다.
 
-각 수정 요청에는 **고정 PRD·인터페이스·도메인 모델 + 현재 생성 코드 전체 + 최신 검증 결과 +
-수정 이력**을 넣는다. 이전 대화를 계속 붙이거나 별도 LLM 요약을 호출하지 않는다.
-최근 두 회차는 자세히, 이전 회차는 구조화한 짧은 이력으로 전달한다. 입력이 크면
+각 수정 요청에는 **고정 PRD·인터페이스·도메인 모델 + 현재 생성 코드 전체 + 선택한 수준의
+검증 피드백**을 넣는다. 이전 대화를 계속 붙이거나 별도 LLM 요약을 호출하지 않는다.
+
+| `--feedback-level` | 모델에게 전달하는 테스트 결과 |
+|---|---|
+| `1` | 통과한 채점 항목 수 / 전체 항목 수. 예: `8/9` |
+| `2` | 1번 + 모든 항목의 pass/fail. 오류·skip·timeout도 모델에게는 fail로 표시 |
+| `3` (기본) | 2번보다 상세한 원래 상태, 실패 함수·명령·오류 로그와 그 안에 노출된 테스트 코드, 수정 이력 |
+
+테스트 파일 전체를 추가로 읽어 모델에 제공하지 않는다. 테스트 코드가 오류 로그에 없으면
+별도로 추출하지 않는다. 1·2번에서는 과거 실패 항목이 우회 전달되지 않도록 수정 이력도
+모델 입력에서 제외한다. 파일 블록 형식·프로토콜 오류 안내는 세 수준에서 공통으로 제공한다.
+연구자용 상세 평가 결과·오류 로그·이력·토큰 통계는 수준과 관계없이 모두 저장한다.
+아직 유효한 검증 결과가 없을 때는 0점으로 만들지 않고 미측정으로 알린다.
+
+3번에서 최근 두 회차는 자세히, 이전 회차는 구조화한 짧은 이력으로 전달한다. 입력이 크면
 오래된 이력 → 최근 이력 → 오류 본문 순으로 줄인다. 필수 입력도 들어가지 않으면
 PRD·도메인 모델·코드를 자르지 않고 `context_limit`으로 중단한다.
+`context.json`에 선택한 `feedback_level`, 실제 `history_mode`, `error_chars`, `omissions`를 기록한다.
+1·2번의 의도적인 이력 제외는 컨텍스트 부족으로 생략한 이력과 구분한다.
 
 수정 요청은 변경할 파일의 **전체 내용**을 `<file path="src/...">...</file>`로 받아 적용한다.
 도메인 모델, 요구사항, 제공 데이터, 채점 테스트는 수정하지 않는다. 형식 오류, 빈 응답,
@@ -238,6 +253,8 @@ OS 파일 캐시를 재시작하는 것은 아니다. `both`의 두 방식과 `-
 | `--prd NAME` | `vanilla` | `vanilla`, `unambiguous_defect`, `complete_defect`, `consistent_defect` 중 하나 |
 | `--iters N` | `1` | 모델·프로젝트·방식별 독립 실험 횟수. 1 이상 |
 | `--max-repairs N` | `30` | 최초 생성 이후 수정 요청 횟수. 0~30 |
+| `--feedback-level N` | `3` | 모델에게 보여 줄 테스트 피드백 수준: 1·2·3 |
+| `--seed-base N` | `42` | 독립 반복의 시작 seed. 반복마다 1 증가하며 모델·프로젝트·방식 간 같은 반복 번호에 같은 값 사용 |
 | `--run-name NAME` | 자동 생성 | 새 결과 폴더 이름. 같은 이름의 결과가 있으면 중단 |
 | `--dry-run` | 꺼짐 | 실행 계획만 출력. 모델 호출·로드·결과 파일 생성 없음 |
 
@@ -255,11 +272,40 @@ OS 파일 캐시를 재시작하는 것은 아니다. `both`의 두 방식과 `-
 ./run_lmstudio.sh --prd unambiguous_defect --pipeline both # 두 모델 × 세 프로젝트 × 두 방식
 ./run_lmstudio.sh --prd complete_defect --run-name complete-01
 ./run_lmstudio.sh --prd consistent_defect --run-name consistent-01
+
+# 같은 조건을 3회 또는 5회 독립 반복
+./run_lmstudio.sh --feedback-level 1 --iters 3 --run-name feedback1-three
+./run_lmstudio.sh --feedback-level 2 --iters 5 --run-name feedback2-five
+./run_lmstudio.sh --feedback-level 3 --iters 5 --run-name feedback3-five
+
+# 100, 101, 102, 103, 104를 사용하는 계획 확인
+./run_lmstudio.sh --iters 5 --seed-base 100 --dry-run
 ```
 
 30회는 시간 제한이 아니다. 프로젝트별 실행 시간 상한이나 `--unlimited` 옵션은 없다.
 모델·프로젝트 선택 옵션을 생략하면 기존처럼 두 모델을 각각 37·44·29 순서로 실행한다.
 선택 실행도 새 결과 폴더에서 최초 생성부터 시작하며, 이전 회차를 이어받는 기능은 아니다.
+
+**독립 반복과 코드 수정은 다르다.** `--iters 5`는 최초 생성부터 시작하는 실험 5개이며
+각 실험 안에서 최대 30회 수정한다. 기본 seed는 다음과 같다.
+
+| 독립 반복 | 저장된 `iter` | seed |
+|---|---|---|
+| 1회차 | 0 | 42 |
+| 2회차 | 1 | 43 |
+| 3회차 | 2 | 44 |
+| 4회차 | 3 | 45 |
+| 5회차 | 4 | 46 |
+
+한 독립 반복의 도메인 모델 생성·최초 코드 생성·수정·API 재시도는 같은 seed를 유지한다.
+각 모델·프로젝트·파이프라인·피드백 조건에서 이 순서를 다시 사용한다. 같은 seed가 서로
+다른 모델에서 같은 결과를 뜻하지는 않는다. 피드백 수준은 배치당 하나를 선택하며,
+세 수준을 비교하려면 위처럼 새 실행 이름으로 각각 시작한다. 기본 `direct`에서
+두 모델 × 세 프로젝트 × 5회 반복은 수준당 30개 독립 실험이다.
+
+시작 seed와 마지막 seed가 허용 범위를 벗어나면 모델 로드 전에 거절한다.
+수동 `generate.py`에도 두 옵션을 사용할 수 있다. `--seed-base`는 LM Studio 전용이며
+Claude에 명시하면 거절한다. Claude 결과의 `seed`는 미지정(`null`)으로 기록한다.
 
 한 배치에는 PRD 유형 하나를 선택하며, 선택한 모든 프로젝트에 같은 유형을 적용한다.
 `--dry-run`도 선택한 모든 PRD가 존재하고 UTF-8로 읽히며 빈 내용이 아닌지 확인한다.
@@ -295,7 +341,7 @@ output/
 ├─ batches/<실행 이름>/
 │  ├─ run.log                         전체 진행 로그
 │  ├─ status.json                     현재 배치 단계·완료 작업·오류
-│  ├─ manifest.json                   PRD 선택·프로필·커밋·재로드·태그 정리 정책
+│  ├─ manifest.json                   PRD·피드백 수준·seed 순서·프로필·커밋·재로드 정책
 │  ├─ qwen-37-runtime.json            프로젝트별 실제 모델 로드 설정
 │  ├─ logs/                           생성·평가 명령별 로그
 │  └─ summary.csv / summary.json      모델별 집계를 합친 결과
@@ -320,7 +366,7 @@ output/
 | `tag_cleanup.json` / `tag_cleanup.txt` | 파일별 정리 내역·원본 줄 번호·전후 해시·실제 반영 여부 |
 | `src/` | 해당 회차 코드 스냅샷 |
 | `usage.json` | 토큰 수, 요청 설정, HTTP 시도·재시도 횟수, 종료 이유 |
-| `context.json` | 입력 토큰 예산과 줄인 이력·오류 발췌 정보 |
+| `context.json` | 입력 토큰 예산, 피드백 수준, 실제 이력 모드·오류 발췌 길이·생략 정보 |
 | `record.json` | 형식 오류, 변경 파일, 검증 재사용 회차, 생성·평가 시간 |
 | `validation.json` | 지표별 판정과 실패 테스트 로그 경로 |
 | 명령별 하위 폴더 | 실제 검증 시 `stdout.log`, `stderr.log`, `junit.xml`, `case.json` |
@@ -335,6 +381,10 @@ output/
 실행 중에는 먼저 `run.log`, 개별 `run.json`과 `result.json`을 본다.
 집계의 `passed`는 **최종 점수**이며 `best_passed`와 다를 수 있다. CSV의 빈 점수 칸은 미측정이다.
 서버가 제공하지 않은 토큰 통계도 0으로 추정하지 않고 `null`로 기록한다.
+개별 `run.json`의 `identity`, `result.json`, `summary.csv/json`에 `feedback_level`과 실제
+`seed`를 기록한다. 요청별 `usage.json`에도 실제 sampling seed가 남는다.
+수준이 다른 결과를 콘솔 평균에 합치지 않는다. 예전 결과에 기록이 없던 조건은 미상으로
+유지하며, 다른 수준·seed의 완료 결과를 새 요청의 결과로 건너뛰어 재사용하지 않는다.
 
 | 실험 상태 | 의미와 다음 동작 |
 |---|---|
@@ -407,7 +457,10 @@ Git에는 실행기·테스트·모델 프로필·문서를 공유한다. `outpu
 남겨 둔 인터페이스는 [interface_contracts.csv](benchmark/interface_contracts.csv)에서 확인한다.
 Claude Sonnet 등록과 Claude 전용 프롬프트 캐시도 반영했으며 LM Studio 요청에 캐시 필드를 보내지 않는다.
 
-Qwen·gpt-oss 샘플링·자원 설정, 프로젝트별 재로드, 최신 상태 기반 입력, 최대 30회 수정은 유지한다.
+PRDBench 통합 당시에는 모델 설정을 유지했다. 이후 같은 날 요청에 따라 두 모델의
+컨텍스트를 32,768로 고정하고 gpt-oss 추론 강도를 medium으로 변경했으며,
+피드백 수준 선택과 반복별 seed 변경을 추가했다. 프로젝트별 재로드, 최신 상태 기반 입력,
+최대 30회 수정 규칙은 유지한다.
 새 태그 정리 정책과 업데이트된 테스트·인터페이스 때문에 **이전 실행과 새 실행은 실험 조건이 다르다**.
 같은 조건으로 비교하려면 두 모델 모두 새 버전에서 실행하고 커밋과 정책을 함께 기록한다.
 

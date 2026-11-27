@@ -19,7 +19,7 @@ def test_cli_help_without_anthropic_install():
 
 @pytest.mark.parametrize('name,model_id,temperature,top_p,top_k,repeat,reasoning', [
     ('Qwen3-Coder-30B', 'qus-prdbench-qwen', .7, .8, 20, 1.05, None),
-    ('gpt-oss-20b', 'qus-prdbench-gptoss', 1., 1., 0, 1., 'high'),
+    ('gpt-oss-20b', 'qus-prdbench-gptoss', 1., 1., 0, 1., 'medium'),
 ])
 def test_actual_http_request_preserves_profile_and_excludes_reasoning(
         name, model_id, temperature, top_p, top_k, repeat, reasoning, endpoint, runtime_fixture, monkeypatch):
@@ -110,6 +110,13 @@ def test_native_cpu_thread_count_is_recorded_without_rejecting_the_model(threads
 
 def test_budget_uses_the_instance_that_counted_tokens(endpoint, runtime_fixture, monkeypatch):
     from llm import make_llm
+    import lmstudio_runtime
+    original_profile = lmstudio_runtime.load_profile
+    def extended_profile(key):
+        profile = original_profile(key)
+        profile['runtime']['context_candidates'] = [65536, 32768]
+        return profile
+    monkeypatch.setattr(lmstudio_runtime, 'load_profile', extended_profile)
     # A valid 64K inspection followed by tokenization on a replacement 32K instance.
     runtime_fixture.tokens = 24000
     monkeypatch.setattr(runtime_fixture, 'inspect', lambda self: {**self.state, 'context_length': 65536})

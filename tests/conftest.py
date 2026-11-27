@@ -74,7 +74,7 @@ def completion(text='FINAL_CODE', finish='stop'):
 def snapshot(key='qwen/qwen3-coder-30b', identifier='qus-prdbench-qwen'):
     return {'identifier': identifier, 'model_key': key,
             'quantization': 'MXFP4' if 'gpt-oss' in key else 'Q4_K_M',
-            'context_length': 65536 if 'gpt-oss' in key else 32768,
+            'context_length': 32768,
             'load_config': {'gpu': {'ratio': 'max', 'numCpuExpertLayersRatio': 1},
                 'maxParallelPredictions': 1, 'flashAttention': True, 'offloadKVCacheToGpu': True,
                 'useFp16ForKVCache': True,

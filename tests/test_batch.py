@@ -181,7 +181,7 @@ def test_selected_gptoss_batch_runs_only_44_then_29(batch_repo, endpoint):
         result = execute(repo, env, '--models', 'gpt-oss-20b', '--projects', '44', '29')
     assert result.returncode == 0, result.stdout + result.stderr
     assert len(requests) == 2 and requests[0]['model'] != requests[1]['model']
-    assert all(r['reasoning_effort'] == 'high' and r['temperature'] == 1 for r in requests)
+    assert all(r['reasoning_effort'] == 'medium' and r['temperature'] == 1 for r in requests)
     assert Path(env['FIXTURE_EVENTS']).read_text().splitlines() == [
         'load openai/gpt-oss-20b', 'unload openai/gpt-oss-20b',
         'load openai/gpt-oss-20b', 'unload openai/gpt-oss-20b']
@@ -243,7 +243,7 @@ def test_full_batch_orders_models_and_generates_evaluates_records_results(batch_
     for start in range(0, len(requests), calls_per_project):
         assert {r['model'] for r in requests[start:start + calls_per_project]} == {requests[start]['model']}
     assert all(r['temperature'] == .7 and r['seed'] == 42 for r in requests[:len(requests)//2])
-    assert all(r['temperature'] == 1 and r['reasoning_effort'] == 'high' for r in requests[len(requests)//2:])
+    assert all(r['temperature'] == 1 and r['reasoning_effort'] == 'medium' for r in requests[len(requests)//2:])
     batch = repo / 'output/batches/fixture'
     status = json.loads((batch / 'status.json').read_text())
     assert status['status'] == 'completed'

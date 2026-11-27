@@ -3,6 +3,7 @@ import time
 from abc import ABC, abstractmethod
 from config import *
 from context import ContextBudgetError
+from experiment import iteration_seed
 from model_output import (OUTPUT_FEEDBACK, api_error_details, capture_server_logs,
                           classify_parser_error, completion_status)
 
@@ -64,6 +65,7 @@ class LMStudio(LLM):
         import lmstudio_runtime
 
         self.profile = lmstudio_runtime.load_profile(model_id)
+        self.seed = iteration_seed(self.profile['sampling']['seed'], 0)
         base_url, self.model_id = lmstudio_runtime.connection(self.profile)
         self.base_url = base_url
         self.runtime = lmstudio_runtime.Runtime(self.profile, base_url, self.model_id)
@@ -83,13 +85,19 @@ class LMStudio(LLM):
         validate_runtime(self.profile, state)
         if state['identifier'] != self.model_id:
             raise ValueError('LM Studio runtime mismatch: identifier')
-        self.settings = {'sampling': self.profile['sampling'], 'api': self.profile['api'], 'runtime': state}
+        self.settings = {'sampling': {**self.profile['sampling'], 'seed': self.seed},
+                         'api': self.profile['api'], 'runtime': state}
+
+    def set_seed(self, seed):
+        """Select a trial seed without mutating the profile or prior usage snapshots."""
+        self.seed = iteration_seed(seed, 0)
+        self._record_runtime(self.settings['runtime'])
 
     def chat(self, user_prompt):
         import openai
 
         api = self.profile['api']
-        sampling = dict(self.profile['sampling'])
+        sampling = {**self.profile['sampling'], 'seed': self.seed}
         request = dict(model=self.model_id, messages=[{'role': 'user', 'content': user_prompt}],
                        max_tokens=api['max_tokens'], temperature=sampling.pop('temperature'),
                        top_p=sampling.pop('top_p'), seed=sampling.pop('seed'), extra_body=sampling)

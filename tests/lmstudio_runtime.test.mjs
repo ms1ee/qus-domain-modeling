@@ -6,6 +6,10 @@ import {prepare, unloadOwned} from '../generate/lmstudio_runtime.mjs';
 const data = JSON.parse(readFileSync(new URL('../generate/lmstudio_profiles.json', import.meta.url)));
 const profile = {model_key: 'qwen/qwen3-coder-30b', ...data.models['qwen/qwen3-coder-30b'], runtime: data.runtime};
 const request = {identifier: profile.identifier, profile};
+// Exercise generic fallback behavior with an explicit alternative profile;
+// the experiment's actual default now requires exactly 32K.
+const fallbackRequest = {...request, profile: {...profile, runtime: {
+  ...profile.runtime, context_candidates: [65536, 32768]}}};
 
 function model(context = 32768, changes = {}) {
   return {identifier: profile.identifier,
@@ -51,7 +55,7 @@ test('low VRAM unloads only the new model and falls back from 64K to 32K', async
     assert.equal(options.config.gpu.numCpuExpertLayersRatio, 1);
     const item = model(options.config.contextLength); owned.push(item); return item;
   }}};
-  const state = await prepare(client, request, () => owned.length === 1 ? 400 : 2000);
+  const state = await prepare(client, fallbackRequest, () => owned.length === 1 ? 400 : 2000);
   assert.equal(state.context_length, 32768);
   assert.equal(owned.length, 2);
   assert.equal(owned[0].unloads, 1);
@@ -62,14 +66,14 @@ test('model load OOM also falls back, but unrelated load errors do not', async (
   for (const [message, expectedCalls] of [['out of memory', 2], ['model file not found', 1]]) {
     let calls = 0;
     const client = {llm: {listLoaded: async () => [], load: async () => {calls++; throw Error(message);}}};
-    await assert.rejects(prepare(client, request, () => 2000));
+    await assert.rejects(prepare(client, fallbackRequest, () => 2000));
     assert.equal(calls, expectedCalls);
   }
 });
 
 test('wrong runtime is cleaned up and aborts without a smaller-context retry', async () => {
   let loads = 0;
-  const wrong = model(65536, {flashAttention: false});
+  const wrong = model(32768, {flashAttention: false});
   const client = {llm: {listLoaded: async () => [], load: async () => {loads++; return wrong;}}};
   await assert.rejects(prepare(client, request, () => 2000), /flashAttention/);
   assert.equal(loads, 1);
@@ -81,7 +85,7 @@ test('cleanup failure stops fallback', async () => {
   const owned = model(65536);
   owned.unload = async () => {throw Error('cleanup failed');};
   const client = {llm: {listLoaded: async () => [], load: async () => {loads++; return owned;}}};
-  await assert.rejects(prepare(client, request, () => 200), /cleanup failed/);
+  await assert.rejects(prepare(client, fallbackRequest, () => 200), /cleanup failed/);
   assert.equal(loads, 1);
 });
 

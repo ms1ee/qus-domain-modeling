@@ -229,7 +229,7 @@ def evaluate_run(run_dir, task, prd, pipeline, nth):
     return result
 
 
-SUMMARY_FIELDS = ['task', 'prd', 'pipeline', 'iter', 'passed', 'total', 'status',
+SUMMARY_FIELDS = ['task', 'prd', 'pipeline', 'iter', 'feedback_level', 'seed', 'passed', 'total', 'status',
                   'max_repairs', 'repairs_used', 'first_pass_round', 'initial_passed',
                   'best_passed', 'final_passed', 'initial_round', 'best_round', 'final_round',
                   'source_hash', 'llm_seconds', 'validation_seconds', 'elapsed_seconds',
@@ -315,15 +315,16 @@ def summarize(outdir, results):
 
     groups = defaultdict(list)
     for r in results:
-        groups[(r["task"], r["prd"], r["pipeline"])].append(r)
+        groups[(r["task"], r["prd"], r["pipeline"], r.get('feedback_level'))].append(r)
     measured = {k: [r for r in v if r.get('passed') is not None and r.get('total')] for k, v in groups.items()}
     rate = {k: sum(r['passed'] / r['total'] for r in v) / len(v) for k, v in measured.items() if v}
-    for key in sorted(groups):
-        task, prd, pipeline = key
+    for key in sorted(groups, key=lambda key: (*key[:3], str(key[3]))):
+        task, prd, pipeline, feedback_level = key
         runs = groups[key]
         score = f'{rate[key] * 100:.1f}%' if key in rate else 'unmeasured'
-        line = f'{task} {prd} {pipeline}: {score} ({len(measured[key])}/{len(runs)} measured iters)'
-        base = (task, "vanilla", pipeline)
+        level = feedback_level if feedback_level is not None else 'unknown'
+        line = f'{task} {prd} {pipeline} feedback={level}: {score} ({len(measured[key])}/{len(runs)} measured iters)'
+        base = (task, "vanilla", pipeline, feedback_level)
         if prd != "vanilla" and base in rate and key in rate:
             line += "  delta vs vanilla: %+.1f%%p" % ((rate[key] - rate[base]) * 100)
         print(line)
