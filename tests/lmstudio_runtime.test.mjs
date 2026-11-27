@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import test from 'node:test';
-import {prepare, unloadOwned} from '../generate/lmstudio_runtime.mjs';
+import {prepare, snapshot, unloadOwned} from '../generate/lmstudio_runtime.mjs';
 
 const data = JSON.parse(readFileSync(new URL('../generate/lmstudio_profiles.json', import.meta.url)));
 const profile = {model_key: 'qwen/qwen3-coder-30b', ...data.models['qwen/qwen3-coder-30b'], runtime: data.runtime};
@@ -79,6 +79,23 @@ test('preparation applies CPU threads to the backend startup and records the ove
   assert.equal(passed.useFp16ForKVCache, true);
   assert.equal(passed.contextLength, 32768);
   assert.equal('llamaCppArgumentsOverride' in configured.profile.runtime.load_config, false);
+});
+
+test('runtime snapshots retain numeric thread settings without unrelated argument values', async () => {
+  for (const value of ['12', '12 --api-key fixture-only-secret']) {
+    const existing = model(32768, {llamaCppArgumentsOverride: {
+      enabled: true, excludeAllConfig: false,
+      disabledParameters: ['--threads', '--api-key'],
+      overrideParameters: [{key: '--threads', value},
+        {key: '--api-key', value: 'fixture-only-secret'}],
+    }});
+    const state = await snapshot(existing);
+    assert.doesNotMatch(JSON.stringify(state), /api-key|fixture-only-secret/);
+    assert.deepEqual(state.load_config.llamaCppArgumentsOverride, {
+      enabled: true, excludeAllConfig: false, disabledParameters: ['--threads'],
+      overrideParameters: value === '12' ? [{key: '--threads', value: '12'}] : [],
+    });
+  }
 });
 
 test('low VRAM unloads only the new model and falls back from 64K to 32K', async () => {

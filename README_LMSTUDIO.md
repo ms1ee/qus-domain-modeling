@@ -178,6 +178,7 @@ export LMSTUDIO_SDK_PATH="$PWD/.lmstudio-sdk/node_modules/@lmstudio/sdk/dist/ind
 CPU expert 비율은 레이어 수 기준의 배치 설정이며, 전체 가중치 바이트 중 CPU 비중을
 정확히 뜻하지 않는다. 실제 레이어 수로 변환할 때 반올림이 개입한다.
 스레드 로드 설정은 결과의 `load_config.llamaCppArgumentsOverride`에서 확인한다.
+이 기록에는 스레드 관련 설정만 저장한다.
 `prediction_config.cpuThreads`는 네이티브 추론 기본값을 별도로 기록한 것이며
 실제 백엔드 스레드 풀 크기와 같다고 해석하면 안 된다. 이 값이 다르다는 이유로 실행을 막지는 않는다.
 

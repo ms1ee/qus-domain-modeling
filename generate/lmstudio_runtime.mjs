@@ -5,6 +5,19 @@ import {homedir} from 'node:os';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 
+function threadArgumentsSnapshot(config) {
+  // A manually loaded model may have unrelated arguments containing credentials.
+  // Persist only numeric --threads values, never arbitrary custom argument text.
+  const parameters = Array.isArray(config.overrideParameters) ? config.overrideParameters : [];
+  const threads = parameters.filter(item => item?.key === '--threads' &&
+    typeof item.value === 'string' && /^\d+$/.test(item.value) &&
+    Number.isSafeInteger(Number(item.value)) && Number(item.value) > 0);
+  return {enabled: config.enabled === true, excludeAllConfig: config.excludeAllConfig === true,
+    disabledParameters: Array.isArray(config.disabledParameters) &&
+      config.disabledParameters.includes('--threads') ? ['--threads'] : [],
+    overrideParameters: threads.map(item => ({key: '--threads', value: String(Number(item.value))}))};
+}
+
 export async function snapshot(model) {
   const info = await model.getModelInfo();
   const load = await model.getLoadConfig();
@@ -12,10 +25,14 @@ export async function snapshot(model) {
   const fields = ['contextLength', 'gpu', 'maxParallelPredictions', 'flashAttention',
     'offloadKVCacheToGpu', 'useFp16ForKVCache', 'llamaKCacheQuantizationType',
     'llamaVCacheQuantizationType', 'evalBatchSize', 'physicalBatchSize',
-    'keepModelInMemory', 'tryMmap', 'gpuStrictVramCap', 'llamaCppArgumentsOverride'];
+    'keepModelInMemory', 'tryMmap', 'gpuStrictVramCap'];
+  const loadConfig = Object.fromEntries(fields.filter(k => k in load).map(k => [k, load[k]]));
+  if (load.llamaCppArgumentsOverride) {
+    loadConfig.llamaCppArgumentsOverride = threadArgumentsSnapshot(load.llamaCppArgumentsOverride);
+  }
   return {identifier: info.identifier, instance_reference: info.instanceReference, model_key: info.modelKey,
     quantization: info.quantization?.name, context_length: info.contextLength,
-    load_config: Object.fromEntries(fields.filter(k => k in load).map(k => [k, load[k]])),
+    load_config: loadConfig,
     prediction_config: {cpuThreads: prediction.cpuThreads}};
 }
 
