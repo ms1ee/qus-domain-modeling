@@ -48,6 +48,39 @@ test('a different CPU thread count is observed without rejecting preparation', a
   assert.equal(existing.unloads, 0);
 });
 
+test('GPU ratio validation compares the configured value, including fractional placement', async () => {
+  const cases = [[.9, .9, true], [.9, 1, false], [.9, .8, false],
+    ['max', 1, true], [1, 'max', true], ['off', 0, true], [0, 'off', true],
+    [1, true, false], [0, false, false], [.9, '0.9', false], [.9, undefined, false]];
+  for (const [expected, actual, accepted] of cases) {
+    const configured = structuredClone(request);
+    configured.profile.runtime.load_config.gpu.numCpuExpertLayersRatio = expected;
+    const existing = model(32768, {gpu: {ratio: 'max', numCpuExpertLayersRatio: actual}});
+    const client = {llm: {listLoaded: async () => [existing]}};
+    if (accepted) await prepare(client, configured, () => 2000);
+    else await assert.rejects(prepare(client, configured, () => 2000), /gpu.numCpuExpertLayersRatio/);
+    assert.equal(existing.unloads, 0);
+  }
+});
+
+test('preparation applies CPU threads to the backend startup and records the override', async () => {
+  const configured = structuredClone(request);
+  configured.profile.runtime.cpu_threads = 12;
+  let passed;
+  const client = {llm: {listLoaded: async () => [], load: async (key, options) => {
+    passed = options.config;
+    return model(options.config.contextLength, options.config);
+  }}};
+  const state = await prepare(client, configured, () => 2000);
+  const expected = {enabled: true, disabledParameters: ['--threads'], excludeAllConfig: false,
+    overrideParameters: [{key: '--threads', value: '12'}]};
+  assert.deepEqual(passed.llamaCppArgumentsOverride, expected);
+  assert.deepEqual(state.load_config.llamaCppArgumentsOverride, expected);
+  assert.equal(passed.useFp16ForKVCache, true);
+  assert.equal(passed.contextLength, 32768);
+  assert.equal('llamaCppArgumentsOverride' in configured.profile.runtime.load_config, false);
+});
+
 test('low VRAM unloads only the new model and falls back from 64K to 32K', async () => {
   const owned = [];
   const client = {llm: {listLoaded: async () => [], load: async (key, options) => {

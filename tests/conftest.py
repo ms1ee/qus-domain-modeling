@@ -1,4 +1,5 @@
 import contextlib
+from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import threading
@@ -72,13 +73,11 @@ def completion(text='FINAL_CODE', finish='stop'):
 
 
 def snapshot(key='qwen/qwen3-coder-30b', identifier='qus-prdbench-qwen'):
+    from lmstudio_runtime import load_profile
     return {'identifier': identifier, 'model_key': key,
             'quantization': 'MXFP4' if 'gpt-oss' in key else 'Q4_K_M',
             'context_length': 32768,
-            'load_config': {'gpu': {'ratio': 'max', 'numCpuExpertLayersRatio': 1},
-                'maxParallelPredictions': 1, 'flashAttention': True, 'offloadKVCacheToGpu': True,
-                'useFp16ForKVCache': True,
-                'llamaKCacheQuantizationType': False, 'llamaVCacheQuantizationType': False},
+            'load_config': deepcopy(load_profile(key)['runtime']['load_config']),
             'prediction_config': {'cpuThreads': 7}}
 
 

@@ -110,6 +110,49 @@ def test_native_cpu_thread_count_is_recorded_without_rejecting_the_model(threads
     assert state['prediction_config']['cpuThreads'] == threads
 
 
+@pytest.mark.parametrize('expected,actual,accepted', [
+    (.9, .9, True), (.9, 1, False), (.9, .8, False),
+    ('max', 1, True), (1, 'max', True), ('off', 0, True), (0, 'off', True),
+    (1, True, False), (0, False, False), (.9, '0.9', False), (.9, None, False),
+])
+def test_gpu_ratio_matches_the_configured_value(expected, actual, accepted):
+    from lmstudio_runtime import load_profile, validate_runtime
+    profile = load_profile('qwen/qwen3-coder-30b')
+    state = snapshot()
+    profile['runtime']['load_config']['gpu']['numCpuExpertLayersRatio'] = expected
+    state['load_config']['gpu']['numCpuExpertLayersRatio'] = actual
+    if accepted:
+        validate_runtime(profile, state)
+    else:
+        with pytest.raises(ValueError, match='gpu.numCpuExpertLayersRatio'):
+            validate_runtime(profile, state)
+
+
+def test_per_model_runtime_merges_nested_gpu_config_without_leaking(tmp_path, monkeypatch):
+    import lmstudio_runtime
+    data = json.loads((ROOT / 'generate/lmstudio_profiles.json').read_text())
+    data['models']['qwen/qwen3-coder-30b']['runtime'] = {
+        'cpu_threads': 8, 'load_config': {'gpu': {'numCpuExpertLayersRatio': .9}}}
+    data['models']['openai/gpt-oss-20b']['runtime'] = {
+        'cpu_threads': 12, 'load_config': {'gpu': {'numCpuExpertLayersRatio': .8}}}
+    (tmp_path / 'lmstudio_profiles.json').write_text(json.dumps(data))
+    monkeypatch.setattr(lmstudio_runtime, 'HERE', tmp_path)
+    qwen = lmstudio_runtime.load_profile('qwen/qwen3-coder-30b')
+    gpt = lmstudio_runtime.load_profile('openai/gpt-oss-20b')
+    assert qwen['runtime']['cpu_threads'] == 8
+    assert gpt['runtime']['cpu_threads'] == 12
+    assert qwen['runtime']['load_config']['gpu'] == {'ratio': 'max', 'numCpuExpertLayersRatio': .9}
+    assert gpt['runtime']['load_config']['gpu']['numCpuExpertLayersRatio'] == .8
+    assert qwen['runtime']['context_candidates'] == [32768]
+    assert qwen['runtime']['load_config']['useFp16ForKVCache'] is True
+    qwen['runtime']['load_config']['gpu']['ratio'] = 'off'
+    qwen['runtime']['context_candidates'].append(8192)
+    fresh = lmstudio_runtime.load_profile('qwen/qwen3-coder-30b')
+    assert fresh['runtime']['load_config']['gpu']['ratio'] == 'max'
+    assert fresh['runtime']['context_candidates'] == [32768]
+    assert gpt['runtime']['load_config']['gpu']['ratio'] == 'max'
+
+
 def test_budget_uses_the_instance_that_counted_tokens(endpoint, runtime_fixture, monkeypatch):
     from llm import make_llm
     import lmstudio_runtime

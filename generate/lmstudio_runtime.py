@@ -1,6 +1,7 @@
 """LM Studio inspection/preparation; generation never implicitly loads a model."""
 import json
 import os
+from copy import deepcopy
 from pathlib import Path
 import subprocess
 import signal
@@ -10,10 +11,31 @@ from urllib.parse import urlsplit, urlunsplit
 HERE = Path(__file__).resolve().parent
 
 
+def _merge_settings(base, overrides):
+    """Keep common runtime settings when a model overrides only a nested field."""
+    merged = deepcopy(base)
+    for key, value in overrides.items():
+        merged[key] = (_merge_settings(merged[key], value)
+                       if isinstance(merged.get(key), dict) and isinstance(value, dict)
+                       else deepcopy(value))
+    return merged
+
+
 def load_profile(model_key):
     data = json.loads((HERE / "lmstudio_profiles.json").read_text())
-    return {**data["models"][model_key], "model_key": model_key,
-            "api": data["api"], "runtime": data["runtime"]}
+    model = data["models"][model_key]
+    return {**model, "model_key": model_key, "api": data["api"],
+            "runtime": _merge_settings(data["runtime"], model.get("runtime", {}))}
+
+
+def _gpu_setting_matches(field, expected, actual):
+    if field in ("ratio", "numCpuExpertLayersRatio"):
+        def ratio(value):
+            return 1 if value == "max" else 0 if value == "off" else value
+        expected, actual = ratio(expected), ratio(actual)
+        return (type(expected) in (int, float) and type(actual) in (int, float)
+                and 0 <= expected <= 1 and expected == actual)
+    return expected == actual
 
 
 def validate_runtime(profile, state):
@@ -29,12 +51,12 @@ def validate_runtime(profile, state):
     for key, value in profile["runtime"]["load_config"].items():
         if key == "gpu":
             gpu = actual.get("gpu", {})
-            for field in value:
-                require(gpu.get(field) in ("max", 1), f"gpu.{field}")
+            for field, expected in value.items():
+                require(_gpu_setting_matches(field, expected, gpu.get(field)), f"gpu.{field}")
         else:
             require(key in actual and actual[key] == value, key)
-    # CPU threads are a native inference default, not a model-identity invariant.
-    # Keep the observed value in snapshots without rejecting other thread counts.
+    # Native prediction cpuThreads can differ from the startup thread pool.
+    # Record both settings without rejecting a different native prediction count.
 
 
 class Runtime:

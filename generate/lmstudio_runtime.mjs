@@ -12,11 +12,21 @@ export async function snapshot(model) {
   const fields = ['contextLength', 'gpu', 'maxParallelPredictions', 'flashAttention',
     'offloadKVCacheToGpu', 'useFp16ForKVCache', 'llamaKCacheQuantizationType',
     'llamaVCacheQuantizationType', 'evalBatchSize', 'physicalBatchSize',
-    'keepModelInMemory', 'tryMmap', 'gpuStrictVramCap'];
+    'keepModelInMemory', 'tryMmap', 'gpuStrictVramCap', 'llamaCppArgumentsOverride'];
   return {identifier: info.identifier, instance_reference: info.instanceReference, model_key: info.modelKey,
     quantization: info.quantization?.name, context_length: info.contextLength,
     load_config: Object.fromEntries(fields.filter(k => k in load).map(k => [k, load[k]])),
     prediction_config: {cpuThreads: prediction.cpuThreads}};
+}
+
+function gpuSettingMatches(field, expected, actual) {
+  if (['ratio', 'numCpuExpertLayersRatio'].includes(field)) {
+    const ratio = value => value === 'max' ? 1 : value === 'off' ? 0 : value;
+    expected = ratio(expected); actual = ratio(actual);
+    return typeof expected === 'number' && typeof actual === 'number' &&
+      expected >= 0 && expected <= 1 && expected === actual;
+  }
+  return JSON.stringify(expected) === JSON.stringify(actual);
 }
 
 function validate(profile, state, identifier) {
@@ -28,10 +38,13 @@ function validate(profile, state, identifier) {
   require(expected.context_candidates.includes(state.context_length), 'context_length');
   for (const [key, value] of Object.entries(expected.load_config)) {
     if (key === 'gpu') {
-      for (const field of Object.keys(value)) require(['max', 1].includes(state.load_config.gpu?.[field]), `gpu.${field}`);
+      for (const [field, configured] of Object.entries(value)) {
+        require(gpuSettingMatches(field, configured, state.load_config.gpu?.[field]), `gpu.${field}`);
+      }
     } else require(state.load_config[key] === value, key);
   }
-  // Report the native CPU-thread setting; do not reject other thread counts.
+  // Native prediction cpuThreads and the startup thread pool are recorded separately.
+  // Do not reject a different native prediction count.
 }
 
 export async function prepare(client, request, freeVram) {
@@ -52,8 +65,14 @@ export async function prepare(client, request, freeVram) {
       request.signal?.throwIfAborted();
       // Recheck at each attempt; never unload a model this helper did not load.
       if ((await client.llm.listLoaded()).length) throw new Error('Another model was loaded during preparation');
+      // llama-server fixes its thread pool at startup. Prediction cpuThreads alone
+      // did not change that pool on the tested backend; replace only --threads.
+      const config = {...profile.runtime.load_config, contextLength,
+        llamaCppArgumentsOverride: {enabled: true, disabledParameters: ['--threads'],
+          excludeAllConfig: false,
+          overrideParameters: [{key: '--threads', value: String(profile.runtime.cpu_threads)}]}};
       owned = await client.llm.load(profile.model_key, {identifier, deviceIdentifier: null,
-        config: {...profile.runtime.load_config, contextLength}, signal: request.signal, verbose: false});
+        config, signal: request.signal, verbose: false});
       request.signal?.throwIfAborted();
       const state = await snapshot(owned);
       validate(profile, state, identifier);

@@ -147,13 +147,15 @@ export LMSTUDIO_SDK_PATH="$PWD/.lmstudio-sdk/node_modules/@lmstudio/sdk/dist/ind
 | repeat_penalty / min_p | 1.05 / 0 | 1.0 / 0 |
 | seed | 반복별 42, 43, 44, … | 반복별 42, 43, 44, … |
 | reasoning_effort | 지정하지 않음 | medium |
+| CPU expert 배치 비율 | `0.85` | `0.5` |
+| 백엔드 CPU 스레드 | `10` | `8` |
 
 공통 자원·요청 설정은 다음과 같다.
 
 | 항목 | 설정과 의미 |
 |---|---|
-| CPU/GPU | MoE expert는 CPU, 나머지 레이어는 가능한 한 GPU에 배치 |
-| CPU 스레드 | 현재 서버의 모델별 기본값 10. 아래 설명 참고 |
+| CPU/GPU | 위 비율만큼의 레이어에 있는 MoE expert를 CPU에 두고, 나머지는 가능한 한 GPU에 배치 |
+| CPU 스레드 | 프로필의 모델별 `runtime.cpu_threads`를 모델 로드 시 적용. 아래 설명 참고 |
 | 컨텍스트 | 두 모델 모두 32,768로 고정. 다른 크기의 기존 모델은 거절하며, 메모리 부족 또는 로드 후 GPU 여유 768 MiB 미만이면 중단 |
 | KV cache | GPU에 배치, F16, KV 양자화 비활성화 |
 | Flash Attention / 동시 예측 | 활성화 / 1개 |
@@ -166,20 +168,37 @@ export LMSTUDIO_SDK_PATH="$PWD/.lmstudio-sdk/node_modules/@lmstudio/sdk/dist/ind
 두 모델의 입력 예산은 각각 23,552토큰이다. 실제 로드값은 결과의
 `*-runtime.json`에서 확인한다. 고정 시드도 하드웨어·런타임이 다르면 동일 출력을 보장하지 않는다.
 
-**CPU 스레드는 서버별 준비가 필요하다.** 프로필의 `runtime.cpu_threads=10`은 의도한
-값을 기록할 뿐 API로 강제하지 않는다. 현재 서버는 각 모델의
-`~/.lmstudio/hub/models/<모델 키>/model.yaml`에 있는 `config.operation.fields` 목록에
-다음 항목을 설정했다. 다른 서버에서는 기존 설정을 보존하면서 이 항목을 추가·변경하고
-모델을 다시 로드한 뒤 실제 값을 확인한다. 실행 중인 실험의 설정은 바꾸지 않는다.
+**CPU 스레드는 이제 실행기가 로드 단계에서 적용한다.** 이전에는 네이티브 설정과
+`prediction_config.cpuThreads`가 10이어도, 이 서버의 llama-server는 `--threads 7`로
+시작했다. 추론 요청의 `cpuThreads`를 바꿔도 이 스레드 풀은 바뀌지 않았다.
+현재는 SDK의 공개 옵션 `llamaCppArgumentsOverride`로 `--threads`만 교체한다.
+모델 YAML을 따로 편집할 필요는 없다.
 
-```yaml
-# config.operation.fields 목록의 항목 하나
-- key: llm.prediction.llama.cpuThreads
-  value: 10
-```
+프로필의 공통 `runtime`에 모델별 `models.<모델 키>.runtime`을 중첩 병합한다.
+CPU expert 비율은 레이어 수 기준의 배치 설정이며, 전체 가중치 바이트 중 CPU 비중을
+정확히 뜻하지 않는다. 실제 레이어 수로 변환할 때 반올림이 개입한다.
+스레드 로드 설정은 결과의 `load_config.llamaCppArgumentsOverride`에서 확인한다.
+`prediction_config.cpuThreads`는 네이티브 추론 기본값을 별도로 기록한 것이며
+실제 백엔드 스레드 풀 크기와 같다고 해석하면 안 된다. 이 값이 다르다는 이유로 실행을 막지는 않는다.
 
-실제 값은 `prediction_config.cpuThreads`로 기록된다. 스레드 값이 10과 다르다는 이유만으로
-실행을 막지는 않는다. Hub 모델 정의를 갱신한 뒤에는 이 기본값도 다시 확인한다.
+이 방식은 현재 설치된 SDK 2.1.0과 CUDA llama.cpp 런타임 2.73.0에서 실제 서버 인자까지
+확인했다. `llamaCppArgumentsOverride`는 실험적 SDK 옵션이므로 다른 버전/백엔드에서는
+지원 여부와 로드 로그를 확인해야 한다.
+
+2026-11-27 하드웨어 측정 결과와 조건은
+[CPU/GPU 속도 측정 기록](docs/benchmarks/2026-11-27-lmstudio-runtime.md)에 있다.
+컨텍스트 32,768·F16 KV cache·양자화·샘플링·gpt-oss medium은 유지했다.
+
+같은 최초 생성 입력으로 512토큰을 생성한 2회 중앙값은 다음과 같다.
+수정 입력까지 포함하면 출력 속도 향상은 Qwen 약 17~18%, gpt-oss 약 49~52%였다.
+
+| 모델 | 기존 출력 토큰/초 | 변경 후 출력 토큰/초 | 측정 중 최소 GPU 여유 |
+|---|---:|---:|---:|
+| Qwen | 23.55 | 27.64 | 1,216 MiB |
+| gpt-oss | 21.87 | 32.53 | 928 MiB |
+
+약 1만 9천 토큰 입력의 메모리 검사도 완료했다. 이는 현재 서버에서 측정한 짧은 요청의
+속도이며, 전체 PRDBench 실행 시간이나 통과율의 개선을 보장하는 수치는 아니다.
 
 ## 5. 실험 과정과 대화 관리
 
@@ -355,6 +374,8 @@ gpt-oss는 **65,536 / reasoning high**를 사용했다. 현재의 **32,768 / med
 기본 배치가 중단 없이 모두 진행되면 코드 생성·수정 요청은 최소 36회, 최대 1,116회이며
 도메인 모델 생성 18회가 추가된다. 전송 재시도는 별도다. 새 추론 강도, 피드백 정보량, 수정 성공 시점에 따라
 시간은 달라진다. 실제 진행 중에는 각 `run.json`과 `rounds/*/record.json`의 시간을 확인한다.
+위 일정 추정은 CPU/GPU 배치 조정 전의 기록이다. 새 배치의 짧은 속도 측정만으로
+전체 소요 시간을 일정 비율 줄여 계산하지 않는다. 생성 길이와 수정 횟수도 달라질 수 있다.
 
 ### 단일 모델·프로젝트만 수동 실행하기
 
