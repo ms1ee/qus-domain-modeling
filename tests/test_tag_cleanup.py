@@ -88,6 +88,8 @@ def test_non_python_data_is_never_cleaned(path):
     '<file path="src/calculator.py">\n<file path="../unsafe.py">\npartial\n' + GOOD,
     '<file path="src/calculator.py">\npartial\n<file wrong="x">\n' + GOOD,
     '<file path="src/calculator.py">\npartial\n<file path="src/calculator.py">unfinished',
+    '<file path="src/calculator.py">\nearlier=1\n<file path="src/calculator.py">value=2\n</file>',
+    '<file path="src/calculator.py">\nearlier=1\n<file\npath="src/calculator.py">\nvalue=2\n</file>',
 ])
 def test_normalization_does_not_accept_other_malformed_contracts(raw):
     cleaned, audit = normalize(raw)
@@ -102,6 +104,13 @@ def test_cleaning_never_bypasses_path_or_provided_input_protection(path):
     cleaned, _ = normalize(raw)
     with pytest.raises(ResponseFormatError):
         parse_changes(cleaned, current_files={}, protected_paths={'src/data.py'})
+
+
+def test_reopened_tag_allows_horizontal_whitespace_but_no_code_on_its_line():
+    raw = ('<file path="src/calculator.py">\npartial\n'
+           '  <file path="src/calculator.py"> \t\r\n'
+           'def add(a,b): return a+b\n</file>')
+    assert normalize(raw)[0] == GOOD
 
 
 def test_repair_evaluates_cleaned_code_preserves_raw_usage_and_budget(tiny_benchmark, tmp_path):

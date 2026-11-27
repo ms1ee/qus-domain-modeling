@@ -148,6 +148,23 @@ def test_unknown_prd_is_rejected_before_model_work(batch_repo, prd):
     assert not (repo / 'output').exists() and not Path(env['FIXTURE_EVENTS']).exists()
 
 
+@pytest.mark.parametrize('content', [b'\xff', b' \n\t\r\n'])
+@pytest.mark.parametrize('dry_run', [False, True])
+def test_invalid_prd_content_in_last_project_fails_before_any_model_or_batch(batch_repo, endpoint, content, dry_run):
+    repo, env = batch_repo
+    path = repo / 'benchmark/29/vanilla_PRD.md'
+    path.write_bytes(content)
+    args = ('--dry-run',) if dry_run else ()
+    with endpoint([(200, completion(CODE))]) as (url, requests):
+        env['LMSTUDIO_API_BASE'] = url
+        result = execute(repo, env, *args)
+    assert result.returncode != 0 and str(path) in result.stderr
+    assert not requests
+    assert not (repo / 'output').exists()
+    assert not (repo / '.lmstudio-batch.lock').exists()
+    assert not Path(env['FIXTURE_EVENTS']).exists()
+
+
 def test_selected_prd_dry_run_has_no_model_or_filesystem_side_effects(batch_repo):
     repo, env = batch_repo
     (repo / 'benchmark/44/consistent_defect_PRD.md').write_text('selected variant')

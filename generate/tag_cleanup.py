@@ -13,7 +13,7 @@ from artifacts import BLOCK
 
 POLICY = 'documented-tags-v1'
 STRAY_TAGS = {'</parameter>', '</invoke>'}
-OPEN_FILE = re.compile(r'<file\s+path="([^"\n]+)">\n?')
+OPEN_FILE = re.compile(r'<file[ \t]+path="([^"\n]+)">')
 FILE_MARKER = re.compile(r'</?(?:file|delete)\b')
 
 
@@ -56,13 +56,19 @@ def normalize_response(response: str) -> tuple[str, dict]:
         # Never discard a different path, a delete, or an unknown file wrapper.
         if {m.start() for m in markers} != {m.start() for m in opens}:
             return match.group()
+        cut = 0
         for opening in opens:
             row = body.count('\n', 0, opening.start()) + 1
             line_prefix = body[body.rfind('\n', 0, opening.start()) + 1:opening.start()]
             in_string = any(start <= (row, len(line_prefix)) < end for start, end in literals)
-            if opening.group(1) != path or in_string or line_prefix.strip():
+            line_end = body.find('\n', opening.end())
+            if line_end == -1:
+                line_end = len(body)
+            line_suffix = body[opening.end():line_end]
+            if (opening.group(1) != path or in_string or not re.fullmatch(r'[ \t]*', line_prefix)
+                    or not re.fullmatch(r'[ \t]*\r?', line_suffix)):
                 return match.group()
-        cut = opens[-1].end() if opens else 0
+            cut = min(line_end + 1, len(body))
         replacement = body[cut:]
         literals = _string_spans(replacement)
         if literals is None:

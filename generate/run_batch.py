@@ -148,11 +148,17 @@ def summarize_saved_trials(plan, batch):
 def validate_prd_inputs(plan):
     if plan['prd'] not in PRD_VARIANTS:
         raise ValueError(f'Unknown PRD variant: {plan["prd"]}')
-    missing = [ROOT / 'benchmark' / task / f'{plan["prd"]}_PRD.md'
-               for task in plan['projects']
-               if not (ROOT / 'benchmark' / task / f'{plan["prd"]}_PRD.md').is_file()]
+    paths = [ROOT / 'benchmark' / task / f'{plan["prd"]}_PRD.md' for task in plan['projects']]
+    missing = [path for path in paths if not path.is_file()]
     if missing:
         raise FileNotFoundError('Selected PRD files not found: ' + ', '.join(str(path) for path in missing))
+    for path in paths:
+        try:
+            content = path.read_text(encoding='utf-8')
+        except (OSError, UnicodeError) as error:
+            raise ValueError(f'Selected PRD cannot be read as UTF-8: {path}') from error
+        if not content.strip():
+            raise ValueError(f'Selected PRD is empty or whitespace-only: {path}')
 
 
 def execute(plan):
