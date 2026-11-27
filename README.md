@@ -15,7 +15,7 @@ echo "ANTHROPIC_API_KEY=..." > .env
 
 ```bash
 # 생성·검증·수정: PRD (-> 고정 도메인 모델) -> 코드 -> 단위 테스트
-python generate/generate.py <model> <task> <prd> <iters> <outdir> [--modeling] [--max-repairs 30]
+python generate/generate.py <model> <task> <prd> <iters> <outdir> [--modeling] [--max-repairs 20]
 
 # 저장된 회차 평가의 무결성 확인 및 집계 (기존 단일 생성 결과는 여기서 채점)
 python eval/evaluate.py <model> <outdir> [--force]
@@ -40,7 +40,7 @@ python eval/evaluate.py Claude-Haiku-5.5 vanilla10-1124
 ./run_lmstudio.sh
 ```
 
-기본값은 `both`, 모델·프로젝트·방식별 독립 실험 3회, 최초 생성 후 최대 30회 수정이다.
+기본값은 `both`, 모델·프로젝트·방식별 독립 실험 3회, 최초 생성 후 최대 20회 수정이다.
 두 모델 × 세 프로젝트 × 두 방식 × 3회 = 총 36개 독립 실험을 순차 실행한다.
 프로젝트마다 모델을 해제하고 새 인스턴스로 로드한다. 테스트 미통과 상태로 수정 예산을
 소진하면 결과를 저장하고 다음 프로젝트로 진행한다.

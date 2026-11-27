@@ -46,7 +46,7 @@ def extract_files(response):
     return files, rejected
 
 
-def run_once(llm, task, prd, use_modeling, run_dir, *, max_repairs=30, prd_name='vanilla', nth=0,
+def run_once(llm, task, prd, use_modeling, run_dir, *, max_repairs=20, prd_name='vanilla', nth=0,
              feedback_level=DEFAULT_FEEDBACK_LEVEL, seed=None):
     validate_feedback_level(feedback_level)
     if not 0 <= max_repairs <= 30:
@@ -134,7 +134,7 @@ def log_gen_info(outdir, args, llm):
         f.write("Task: %s, PRD: %s, Pipeline: %s, Iterations: %d\n"
                 % (args.task, args.prd, "modeling" if args.modeling else "direct", args.iters))
         f.write("Start Time: %d\n" % int(time.time()))
-        f.write("Max repairs after initial generation: %d\n" % getattr(args, 'max_repairs', 30))
+        f.write("Max repairs after initial generation: %d\n" % getattr(args, 'max_repairs', 20))
         f.write("Feedback level: %d\n" % getattr(args, 'feedback_level', DEFAULT_FEEDBACK_LEVEL))
         if isinstance(llm, LMStudio):
             base = getattr(args, 'seed_base', None)
@@ -151,7 +151,7 @@ def main():
     parser.add_argument("iters", type=int)
     parser.add_argument("outdir", help="output/<model>/<outdir>")
     parser.add_argument("--modeling", action="store_true", help="PRD -> Modeling -> Code")
-    parser.add_argument('--max-repairs', type=int, default=30, help='Repair requests after initial generation (default: 30)')
+    parser.add_argument('--max-repairs', type=int, default=20, help='Repair requests after initial generation (default: 20)')
     parser.add_argument('--feedback-level', type=int, choices=(1, 2, 3), default=DEFAULT_FEEDBACK_LEVEL,
                         help='1: score (default); 2: score and item outcomes; 3: detailed failures and history')
     parser.add_argument('--seed-base', type=int,

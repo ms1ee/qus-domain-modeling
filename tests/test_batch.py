@@ -259,7 +259,7 @@ def test_full_batch_orders_models_and_generates_evaluates_records_results(batch_
     assert len(summary) == rows
     assert all(r['passed'] == '1' and r['total'] == '1' for r in summary)
     assert all(r['status'] == 'passed' and r['repairs_used'] == '0' for r in summary)
-    assert json.loads((batch / 'manifest.json').read_text())['max_repairs'] == 30
+    assert json.loads((batch / 'manifest.json').read_text())['max_repairs'] == 20
     assert json.loads((batch / 'manifest.json').read_text())['model_reload_policy'] == 'per_project'
     assert {r['model'] for r in summary} == {'Qwen3-Coder-30B', 'gpt-oss-20b'}
     assert json.loads(Path(env['FIXTURE_MODELS']).read_text()) == []
@@ -331,7 +331,7 @@ def test_dry_run_has_no_model_or_filesystem_side_effects(batch_repo):
     plan = json.loads(result.stdout)
     assert plan['pipelines'] == ['modeling'] and plan['projects'] == ['37', '44', '29']
     assert plan['models'] == ['Qwen3-Coder-30B', 'gpt-oss-20b']
-    assert plan['max_repairs'] == 30
+    assert plan['max_repairs'] == 20
     assert plan['prd'] == 'vanilla'
     assert not (repo / 'output').exists()
     assert not Path(env['FIXTURE_EVENTS']).exists()

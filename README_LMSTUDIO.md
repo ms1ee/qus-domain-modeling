@@ -20,7 +20,7 @@ PRD를 읽어 Python 코드를 만들고, 저장소의 단위 테스트로 검�
   실행 중 PRD에 새 결함을 생성하거나 주입하는 기능은 아니다.
 - 기본 실행은 두 모델 × 세 프로젝트 × `both`(두 방식) × 3회 = **36개 독립 실험**이다.
 - 기본 피드백은 **1: 전체 통과 수만 전달**이며, 독립 반복의 seed는 **42 → 43 → 44**다.
-- 각 실험은 **최초 생성 1회 + 최대 수정 30회**이며, 채점 대상이 모두 통과하면 바로 끝난다.
+- 각 실험은 **최초 생성 1회 + 최대 수정 20회**이며, 채점 대상이 모두 통과하면 바로 끝난다.
 - 이 점수는 저장소의 단위 테스트 채점 결과다. PRDBench 전체 공식 점수,
   CLI 인수 테스트, human inspection까지 완료했다는 뜻은 아니다.
 - 테스트의 원본 대비 변경·제외 항목과 해석상 한계는 [PROVENANCE](benchmark/PROVENANCE.md)를 참고한다.
@@ -211,7 +211,7 @@ modeling: PRD → 도메인 모델 1회 생성·고정
 코드 생성 → 문서화된 태그 정리·경로 검증 → 파일 반영 → 단위 테스트
                          ├─ 모두 통과 → 종료
                          └─ 미통과 → 최신 상태로 입력 재구성 → 코드 수정 → 다시 검증
-                                      최대 30회 수정 후 미통과해도 종료
+                                      최대 20회 수정 후 미통과해도 종료
 ```
 
 인터페이스는 [generate/config.py](generate/config.py)에 있는 모듈 경로·클래스·함수·인자 계약이다.
@@ -256,7 +256,7 @@ LM Studio가 생성 출력을 파싱하지 못한 경우에는 `protocol_error`�
 이는 응답 본문에 정확한 `peg-native format` 오류가 있거나, 해당 요청 중 새로 기록된
 같은 모델 식별자의 서버 오류 로그로 확인된 HTTP 400/500에만 적용한다.
 빈 최종 답변은 `empty_response`, 제공하지 않은 도구 호출은 `unsupported_tool_call`로
-구분한다. 이런 응답은 적용하지 않으며 **최초 생성 + 최대 30회 수정 예산 안에서** 처리한다.
+구분한다. 이런 응답은 적용하지 않으며 **최초 생성 + 최대 20회 수정 예산 안에서** 처리한다.
 서버가 토큰 사용량을 제공하지 않으면 `null`로 남긴다. 확인되지 않은 API 오류는
 기존 정책에 따라 재시도 또는 배치 중단하며, 모든 HTTP 400을 무시하지 않는다.
 
@@ -274,7 +274,7 @@ OS 파일 캐시를 재시작하는 것은 아니다. `both`의 두 방식과 `-
 | `--pipeline direct\|modeling\|both` | `both` | 도메인 모델 없이 / 경유 / 두 방식 모두 |
 | `--prd NAME` | `vanilla` | `vanilla`, `unambiguous_defect`, `complete_defect`, `consistent_defect` 중 하나 |
 | `--iters N` | `3` | 모델·프로젝트·방식별 독립 실험 횟수. 1 이상 |
-| `--max-repairs N` | `30` | 최초 생성 이후 수정 요청 횟수. 0~30 |
+| `--max-repairs N` | `20` | 최초 생성 이후 수정 요청 횟수. 0~30 |
 | `--feedback-level N` | `1` | 모델에게 보여 줄 테스트 피드백 수준: 1·2·3 |
 | `--seed-base N` | `42` | 독립 반복의 시작 seed. 반복마다 1 증가하며 모델·프로젝트·방식 간 같은 반복 번호에 같은 값 사용 |
 | `--run-name NAME` | 자동 생성 | 새 결과 폴더 이름. 같은 이름의 결과가 있으면 중단 |
@@ -287,7 +287,7 @@ OS 파일 캐시를 재시작하는 것은 아니다. `both`의 두 방식과 `-
 ./run_lmstudio.sh                                        # 기본: 두 방식 × 3회, 피드백 1, 총 36개
 ./run_lmstudio.sh --pipeline direct --iters 1             # direct만 1회, 총 6개
 ./run_lmstudio.sh --pipeline modeling                     # modeling만 3회, 총 18개
-./run_lmstudio.sh --pipeline both --max-repairs 30 --iters 1  # 12개 실험
+./run_lmstudio.sh --pipeline both --max-repairs 20 --iters 1  # 12개 실험
 ./run_lmstudio.sh --max-repairs 0                         # 최초 생성만 평가
 ./run_lmstudio.sh --pipeline both --iters 3               # 36개 독립 실험
 ./run_lmstudio.sh --run-name baseline-01                  # 사용하지 않은 이름
@@ -309,12 +309,12 @@ OS 파일 캐시를 재시작하는 것은 아니다. `both`의 두 방식과 `-
 위 기본값은 배치 진입점 `run_lmstudio.sh` 기준이다. 수동 `generate.py`는 반복 횟수를
 위치 인자로 지정하고 `--modeling` 유무로 방식을 선택한다. 피드백 기본값 1은 양쪽에 적용된다.
 
-30회는 시간 제한이 아니다. 프로젝트별 실행 시간 상한이나 `--unlimited` 옵션은 없다.
+20회는 시간 제한이 아니다. 프로젝트별 실행 시간 상한이나 `--unlimited` 옵션은 없다.
 모델·프로젝트 선택 옵션을 생략하면 기존처럼 두 모델을 각각 37·44·29 순서로 실행한다.
 선택 실행도 새 결과 폴더에서 최초 생성부터 시작하며, 이전 회차를 이어받는 기능은 아니다.
 
 **독립 반복과 코드 수정은 다르다.** `--iters 5`는 최초 생성부터 시작하는 실험 5개이며
-각 실험 안에서 최대 30회 수정한다. 기본 seed는 다음과 같다.
+각 실험 안에서 최대 20회 수정한다. 기본 seed는 다음과 같다.
 
 | 독립 반복 | 저장된 `iter` | seed |
 |---|---|---|
@@ -372,7 +372,7 @@ gpt-oss는 **65,536 / reasoning high**를 사용했다. 현재의 **32,768 / med
 해석하지 않는다. 모든 실험이 30회 수정을 소진하면 같은 이전 요청 속도로도 약 149시간에
 도메인 모델 생성 시간이 더해진다. 이는 시간 상한이 아니다.
 
-기본 배치가 중단 없이 모두 진행되면 코드 생성·수정 요청은 최소 36회, 최대 1,116회이며
+기본 배치가 중단 없이 모두 진행되면 코드 생성·수정 요청은 최소 36회, 최대 756회이며
 도메인 모델 생성 18회가 추가된다. 전송 재시도는 별도다. 새 추론 강도, 피드백 정보량, 수정 성공 시점에 따라
 시간은 달라진다. 실제 진행 중에는 각 `run.json`과 `rounds/*/record.json`의 시간을 확인한다.
 위 일정 추정은 CPU/GPU 배치 조정 전의 기록이다. 새 배치의 짧은 속도 측정만으로
@@ -385,7 +385,7 @@ gpt-oss는 **65,536 / reasoning high**를 사용했다. 현재의 **32,768 / med
 ```bash
 export PRDBENCH_PYTHON="${PRDBENCH_PYTHON:-/home/kg/.venvs/prdbench/bin/python}"
 "$PRDBENCH_PYTHON" generate/prepare_lmstudio.py Qwen3-Coder-30B
-"$PRDBENCH_PYTHON" generate/generate.py Qwen3-Coder-30B 37 vanilla 1 qwen-37-manual --max-repairs 30
+"$PRDBENCH_PYTHON" generate/generate.py Qwen3-Coder-30B 37 vanilla 1 qwen-37-manual --max-repairs 20
 "$PRDBENCH_PYTHON" eval/evaluate.py Qwen3-Coder-30B qwen-37-manual
 lms unload qus-prdbench-qwen
 ```
@@ -524,7 +524,7 @@ Claude Sonnet 등록과 Claude 전용 프롬프트 캐시도 반영했으며 LM 
 PRDBench 통합 당시에는 모델 설정을 유지했다. 이후 같은 날 요청에 따라 두 모델의
 컨텍스트를 32,768로 고정하고 gpt-oss 추론 강도를 medium으로 변경했으며,
 피드백 수준 선택과 반복별 seed 변경을 추가했다. 프로젝트별 재로드, 최신 상태 기반 입력,
-최대 30회 수정 규칙은 유지한다.
+최대 20회 수정 규칙은 유지한다.
 새 태그 정리 정책과 업데이트된 테스트·인터페이스 때문에 **이전 실행과 새 실행은 실험 조건이 다르다**.
 같은 조건으로 비교하려면 두 모델 모두 새 버전에서 실행하고 커밋과 정책을 함께 기록한다.
 
