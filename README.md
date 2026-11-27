@@ -34,6 +34,7 @@ python eval/evaluate.py Claude-Haiku-5.5 vanilla10-1124
 benchmark/
   PROVENANCE.md                 # PRDBench 출처, 테스트 수정 내역, 채점 제외 항목
   DEFECTS.md                    # 결함 정의와 주입 규칙
+  interface_contracts.csv       # PRD에 없지만 테스트 때문에 interface에 남긴 줄
   <task>/vanilla_PRD.md
   <task>/<type>_defect_PRD.md   # 결함 PRD
   <task>/<type>_defect_log.json # 결함 위치와 대상 metric

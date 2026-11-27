@@ -5,6 +5,8 @@
 - `<id>/vanilla_PRD.md` = `PRDBench/<id>/src/PRD.md` (수정 없음)
 - `<id>/evaluation/` = `PRDBench/<id>/evaluation/` (`__pycache__` 제외). 수정 원칙: PRD를 기준으로 테스트를 고친다.
   PRD/계약에 정의된 문자열 비교는 공백 제거 + 대소문자 무시(`norm`)로 비교한다.
+- PRD에 없지만 테스트 때문에 interface(`generate/config.py`)에 남긴 줄: [`interface_contracts.csv`](interface_contracts.csv)
+  (category: `test_string` 테스트가 비교하는 문자열, `test_env` 테스트 환경 전제, `behavior` 동작 설명 / in_prd: `no`, `partial` / metrics: 그 줄에 의존하는 채점 항목)
 
 ## 37 Company Team Building Event Smart Lottery System
 
