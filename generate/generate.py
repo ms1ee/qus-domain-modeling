@@ -10,6 +10,7 @@ from artifacts import snapshot_hashes, write_json, ArtifactIntegrityError, sourc
 from session import create_state
 from repair import run_trial, response_complete, finish_trial, evaluation
 from context import ContextBudgetError
+from experiment import validate_feedback_level
 
 load_dotenv(os.path.join(ROOT_DIR, ".env"))
 
@@ -45,7 +46,9 @@ def extract_files(response):
     return files, rejected
 
 
-def run_once(llm, task, prd, use_modeling, run_dir, *, max_repairs=30, prd_name='vanilla', nth=0):
+def run_once(llm, task, prd, use_modeling, run_dir, *, max_repairs=30, prd_name='vanilla', nth=0,
+             feedback_level=3):
+    validate_feedback_level(feedback_level)
     if not 0 <= max_repairs <= 30:
         raise ValueError('max_repairs must be between 0 and 30')
     run_dir = Path(run_dir)
@@ -54,7 +57,8 @@ def run_once(llm, task, prd, use_modeling, run_dir, *, max_repairs=30, prd_name=
     benchmark = Path(BENCHMARK_DIR) / task
     inputs = snapshot_hashes(benchmark)
     identity = {'task': task, 'prd': prd_name, 'pipeline': 'modeling' if use_modeling else 'direct',
-                'iter': nth, 'model': getattr(llm, 'model_name', getattr(llm, 'model_id', type(llm).__name__))}
+                'iter': nth, 'feedback_level': feedback_level,
+                'model': getattr(llm, 'model_name', getattr(llm, 'model_id', type(llm).__name__))}
     state = create_state(run_dir, identity, max_repairs=max_repairs, inputs={'benchmark': inputs},
                          settings=getattr(llm, 'settings', {}))
     try:

@@ -14,6 +14,7 @@ from artifacts import (ArtifactIntegrityError, ResponseFormatError, parse_change
 from context import ContextBudgetError, build_prompt, fit_prompt
 from session import create_state, now, record_round
 from tag_cleanup import normalize_response, cleanup_report
+from experiment import validate_feedback_level
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'eval'))
 import evaluate as evaluation
@@ -79,6 +80,7 @@ def run_trial(llm, *, identity: dict, fixed: dict, run_dir: Path, max_repairs: i
               state: dict | None = None) -> dict:
     if not 0 <= max_repairs <= 30:
         raise ValueError('max_repairs must be between 0 and 30')
+    feedback_level = validate_feedback_level(identity.get('feedback_level', 3))
     run_dir = Path(run_dir)
     benchmark = Path(evaluation.BENCHMARK_DIR) / identity['task']
     state = state if state is not None else create_state(
@@ -128,11 +130,14 @@ def run_trial(llm, *, identity: dict, fixed: dict, run_dir: Path, max_repairs: i
             request_fixed = {**fixed, 'round': number, 'max_repairs': max_repairs}
             if hasattr(llm, 'runtime'):
                 packed = fit_prompt(request_fixed, files, validation, state['rounds'],
-                                    preflight=llm.runtime.preflight, format_error=feedback)
+                                    preflight=llm.runtime.preflight, format_error=feedback,
+                                    feedback_level=feedback_level)
             else:
                 packed = {'prompt': build_prompt(request_fixed, files, validation, state['rounds'],
-                                                format_error=feedback),
-                          'rendered_tokens': None, 'input_budget': None, 'omissions': []}
+                                                format_error=feedback, feedback_level=feedback_level),
+                          'rendered_tokens': None, 'input_budget': None, 'omissions': [],
+                          'feedback_level': feedback_level,
+                          'history_mode': 'full' if feedback_level == 3 else 'none', 'error_chars': 6000}
             prompt = packed.pop('prompt')
             (directory / 'prompt.txt').write_text(prompt, encoding='utf-8')
             write_json(directory / 'context.json', packed)
