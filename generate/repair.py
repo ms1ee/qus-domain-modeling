@@ -13,6 +13,7 @@ from artifacts import (ArtifactIntegrityError, ResponseFormatError, parse_change
                        source_digest, write_json)
 from context import ContextBudgetError, build_prompt, fit_prompt
 from session import create_state, now, record_round
+from tag_cleanup import normalize_response, cleanup_report
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'eval'))
 import evaluate as evaluation
@@ -159,8 +160,15 @@ def run_trial(llm, *, identity: dict, fixed: dict, run_dir: Path, max_repairs: i
                 feedback = usage.get('response_feedback') or (
                     'The last response was empty or truncated. Return complete file blocks; no partial files were applied.')
             else:
+                normalized, audit = normalize_response(response)
+                audit['applied'] = False
+                record['tag_cleanup'] = audit
+                if audit['changed']:
+                    (directory / 'cleaned_response.txt').write_text(normalized, encoding='utf-8')
+                write_json(directory / 'tag_cleanup.json', audit)
+                (directory / 'tag_cleanup.txt').write_text(cleanup_report(audit), encoding='utf-8')
                 try:
-                    changes = parse_changes(response, current_files=files, protected_paths=protected)
+                    changes = parse_changes(normalized, current_files=files, protected_paths=protected)
                 except ResponseFormatError as error:
                     record['response_status'] = 'format_error'
                     feedback = str(error)
@@ -170,6 +178,9 @@ def run_trial(llm, *, identity: dict, fixed: dict, run_dir: Path, max_repairs: i
                     revision = publish_revision(run_dir, directory, changes, protected)
                     expected_source = revision['source_hashes']
                     record.update(revision, response_status='complete')
+                    audit['applied'] = True
+                    write_json(directory / 'tag_cleanup.json', audit)
+                    (directory / 'tag_cleanup.txt').write_text(cleanup_report(audit), encoding='utf-8')
             if not (directory / 'src').exists():
                 shutil.copytree(run_dir / 'src', directory / 'src')
             current_hash = source_digest(expected_source)

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from artifacts import write_json
+from tag_cleanup import POLICY as TAG_CLEANUP_POLICY
 
 
 def now():
@@ -17,6 +18,7 @@ def create_state(run_dir: Path, identity: dict, *, max_repairs: int, inputs: dic
     if (run_dir / 'run.json').exists():
         raise FileExistsError(f'Trial already exists; use a new run name: {run_dir}')
     state = {'identity': deepcopy(identity), 'max_repairs': max_repairs, 'repairs_used': 0,
+             'tag_cleanup_policy': TAG_CLEANUP_POLICY,
              'status': 'running', 'phase': 'initializing', 'current_round': None,
              'input_hashes': deepcopy(inputs), 'settings': deepcopy(settings), 'rounds': [],
              'initial_round': None, 'best_round': None, 'final_round': None,
@@ -40,7 +42,7 @@ def record_round(run_dir: Path, state: dict, record: dict) -> None:
                if value['status'] != 'pass'} if validation else {})
     entry = {key: record.get(key) for key in ('round', 'source_hash', 'changed_paths',
               'response_status', 'request_started_at', 'elapsed_seconds', 'llm_seconds',
-              'validation_seconds', 'usage', 'repeat_of_round')}
+              'validation_seconds', 'usage', 'repeat_of_round', 'tag_cleanup')}
     entry.update(passed=score, total=total, failed_items=failed)
     state['rounds'] = [r for r in state['rounds'] if r['round'] != number] + [entry]
     requested = record.get('request_started_at') is not None or record.get('response_status') is not None
