@@ -4,8 +4,9 @@ from abc import ABC, abstractmethod
 from config import *
 from context import ContextBudgetError
 from experiment import DEFAULT_FEEDBACK_LEVEL, iteration_seed, validate_feedback_level
+from lmstudio_contract import POLICY as OUTPUT_CONTRACT_POLICY, SYSTEM_PROMPT, messages
 from model_output import (OUTPUT_FEEDBACK, api_error_details, capture_server_logs,
-                          classify_parser_error, completion_status)
+                          classify_parser_error, completion_status, response_diagnostics)
 
 
 class LLM(ABC):
@@ -88,6 +89,7 @@ class LMStudio(LLM):
             raise ValueError('LM Studio runtime mismatch: identifier')
         self.settings = {'sampling': {**self.profile['sampling'], 'seed': self.seed},
                          'feedback_level': self.feedback_level,
+                         'output_contract': {'policy': OUTPUT_CONTRACT_POLICY, 'system_prompt': SYSTEM_PROMPT},
                          'api': self.profile['api'], 'runtime': state}
 
     def set_trial_options(self, *, seed, feedback_level):
@@ -102,7 +104,7 @@ class LMStudio(LLM):
 
         api = self.profile['api']
         sampling = {**self.profile['sampling'], 'seed': self.seed}
-        request = dict(model=self.model_id, messages=[{'role': 'user', 'content': user_prompt}],
+        request = dict(model=self.model_id, messages=messages(user_prompt),
                        max_tokens=api['max_tokens'], temperature=sampling.pop('temperature'),
                        top_p=sampling.pop('top_p'), seed=sampling.pop('seed'), extra_body=sampling)
         http_attempts = 0
@@ -164,6 +166,7 @@ class LMStudio(LLM):
             'stop_reason': 'max_tokens' if choice.finish_reason == 'length' else choice.finish_reason,
             'finish_reason': choice.finish_reason,
             **completion_status(choice, text),
+            'response_diagnostics': response_diagnostics(choice.message, text),
             'input_tokens': getattr(u, 'prompt_tokens', None),
             'output_tokens': getattr(u, 'completion_tokens', None),
             'cache_read_tokens': getattr(getattr(u, 'prompt_tokens_details', None), 'cached_tokens', None),

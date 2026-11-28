@@ -11,10 +11,11 @@ import tokenize
 
 from artifacts import BLOCK
 
-POLICY = 'documented-tags-v1'
+POLICY = 'documented-tags-v2'
 STRAY_TAGS = {'</parameter>', '</invoke>'}
 OPEN_FILE = re.compile(r'<file[ \t]+path="([^"\n]+)">')
 FILE_MARKER = re.compile(r'</?(?:file|delete)\b')
+TRAILING_CLOSES = re.compile(r'(?:[ \t\r]*\n[ \t\r\n]*</file>)+[ \t\r\n]*')
 
 
 def _string_spans(source):
@@ -39,6 +40,16 @@ def _string_spans(source):
                 and not fstrings):
             return None
     return None if fstrings else spans
+
+
+def _unambiguous_python_block(match, text):
+    path, body, delete = match.groups()
+    if delete is not None:
+        return True  # The strict parser still validates this deletion.
+    closing = match.end() - len('</file>')
+    line_prefix = text[text.rfind('\n', 0, closing) + 1:closing]
+    return (path.endswith('.py') and not line_prefix.strip()
+            and _string_spans(body) is not None and not FILE_MARKER.search(body))
 
 
 def normalize_response(response: str) -> tuple[str, dict]:
@@ -90,8 +101,26 @@ def normalize_response(response: str) -> tuple[str, dict]:
         return opening + ''.join(kept) + '</file>'
 
     cleaned = BLOCK.sub(clean, response)
+    removed_trailing = []
+    matches = list(BLOCK.finditer(cleaned))
+    if matches:
+        last = matches[-1]
+        path, _, _ = last.groups()
+        tail = cleaned[last.end():]
+        # Only discard redundant, standalone terminal wrappers after an
+        # unambiguous Python block. Keep every byte of the source unchanged.
+        if (path and path.endswith('.py') and TRAILING_CLOSES.fullmatch(tail)
+                and all(_unambiguous_python_block(match, cleaned) for match in matches)
+                and not FILE_MARKER.search(BLOCK.sub('', cleaned[:last.end()]))):
+            original_tail_start = len(response) - len(tail)
+            removed_trailing = [
+                {'line': response.count('\n', 0, original_tail_start + marker.start()) + 1,
+                 'tag': '</file>'}
+                for marker in re.finditer(r'</file>', tail)]
+            cleaned = cleaned[:last.end()]
     return cleaned, {
         'policy': POLICY, 'changed': cleaned != response, 'files': files,
+        'removed_trailing_file_tags': removed_trailing,
         'raw_sha256': hashlib.sha256(response.encode('utf-8')).hexdigest(),
         'cleaned_sha256': hashlib.sha256(cleaned.encode('utf-8')).hexdigest(),
     }
@@ -104,4 +133,6 @@ def cleanup_report(audit):
     for entry in audit['files']:
         lines.append(f'{entry["path"]}: removed {len(entry["removed_tag_lines"])} tag line(s); '
                      f'reopened blocks replaced: {entry["reopened_blocks"]}')
+    for entry in audit.get('removed_trailing_file_tags', []):
+        lines.append(f'Redundant terminal {entry["tag"]}: original line {entry["line"]}')
     return '\n'.join(lines) + '\n'

@@ -35,7 +35,9 @@ def test_actual_http_request_preserves_profile_and_excludes_reasoning(
         assert usage['settings']['runtime']['identifier'] == model_id
         request = received[0]
         assert request['model'] == model_id
-        assert request['messages'] == [{'role': 'user', 'content': 'implement this program'}]
+        assert request['messages'] == [
+            {'role': 'system', 'content': usage['settings']['output_contract']['system_prompt']},
+            {'role': 'user', 'content': 'implement this program'}]
         assert (request['temperature'], request['top_p'], request['top_k']) == (temperature, top_p, top_k)
         assert request['repeat_penalty'] == repeat and request['min_p'] == 0 and request['seed'] == 42
         assert request['max_tokens'] == -1

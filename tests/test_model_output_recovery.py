@@ -8,6 +8,48 @@ from conftest import completion
 PEG_ERROR = 'The model produced output that does not match the expected peg-native format'
 
 
+@pytest.mark.parametrize('name', ['Qwen3-Coder-30B', 'gpt-oss-20b'])
+def test_text_only_contract_is_common_and_does_not_carry_trial_history(
+        name, endpoint, runtime_fixture, monkeypatch):
+    from llm import make_llm
+    with endpoint([(200, completion('FINAL_CODE'))]) as (url, requests):
+        monkeypatch.setenv('LMSTUDIO_API_BASE', url)
+        model = make_llm(name)
+        _, first_usage = model.chat('First trial current state')
+        model.set_trial_options(seed=43, feedback_level=1)
+        _, usage = model.chat('New independent trial current state')
+    first, second = [r['messages'] for r in requests]
+    assert [m['role'] for m in first] == ['system', 'user']
+    assert first[0] == second[0]
+    assert 'no Python interpreter' in second[0]['content']
+    assert 'non-empty final answer' in second[0]['content']
+    assert second[1] == {'role': 'user', 'content': 'New independent trial current state'}
+    assert 'First trial' not in json.dumps(second)
+    contract = usage['settings']['output_contract']
+    assert contract['policy'] == 'text-only-final-v1'
+    assert contract['system_prompt'] == first[0]['content']
+    assert first_usage['settings']['output_contract'] == contract
+    assert [r['seed'] for r in requests] == [42, 43]
+
+
+@pytest.mark.parametrize('field', ['reasoning', 'reasoning_content'])
+def test_empty_final_records_reasoning_presence_without_promoting_or_retrying_it(
+        field, endpoint, runtime_fixture, monkeypatch):
+    from llm import make_llm
+    reply = completion('')
+    message = reply['choices'][0]['message']
+    message.pop('reasoning_content')
+    message[field] = 'Never execute this as final code'
+    with endpoint([(200, reply)]) as (url, requests):
+        monkeypatch.setenv('LMSTUDIO_API_BASE', url)
+        text, usage = make_llm('gpt-oss-20b').chat('implement')
+    assert text == '' and usage['response_status'] == 'empty_response'
+    assert usage['response_diagnostics'] == {
+        'final_chars': 0, 'reasoning_field': field, 'reasoning_chars': len(message[field])}
+    assert usage['http_attempts'] == 1 and usage['retries'] == 0 and len(requests) == 1
+    assert usage['output_tokens'] == 50 and usage['reasoning_tokens'] == 20
+
+
 @pytest.mark.parametrize('status', [400, 500])
 def test_identified_output_parse_failure_returns_repair_feedback(status, endpoint, runtime_fixture, monkeypatch):
     from llm import make_llm

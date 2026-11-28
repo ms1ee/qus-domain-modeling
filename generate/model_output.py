@@ -108,3 +108,13 @@ def completion_status(choice, text):
         return {'response_status': 'empty_response', 'response_complete': False,
                 'response_feedback': 'The last response had no final source code. ' + OUTPUT_FEEDBACK}
     return {'response_status': 'complete', 'response_complete': True}
+
+
+def response_diagnostics(message, text):
+    """Record channel presence without turning reasoning into an implementation."""
+    fields = [(key, value) for key in ('reasoning', 'reasoning_content')
+              if isinstance(value := getattr(message, key, None), str)]
+    field, reasoning = next(((key, value) for key, value in fields if value),
+                            fields[0] if fields else (None, None))
+    return {'final_chars': len(text), 'reasoning_field': field,
+            'reasoning_chars': len(reasoning) if reasoning is not None else None}

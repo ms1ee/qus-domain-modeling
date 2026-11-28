@@ -43,7 +43,7 @@ function handle(info) {
     getModelInfo: async () => info,
     getLoadConfig: async () => info.config,
     getBasePredictionConfig: async () => ({cpuThreads: 7}),
-    applyPromptTemplate: async (chat) => chat.messages[0].content[0].text,
+    applyPromptTemplate: async (chat) => chat.messages.map(m => m.content[0].text).join("\\n"),
     countTokens: async () => 100,
     unload: async () => {
       appendFileSync(process.env.FIXTURE_EVENTS, `unload ${info.modelKey}\n`);
@@ -107,14 +107,16 @@ def test_selected_prd_reaches_both_models_and_pipelines_with_matching_identity(b
     assert result.returncode == 0, result.stdout + result.stderr
     assert len(requests) == 6
     for request in requests:
-        prompt = request['messages'][0]['content']
+        prompt = request['messages'][-1]['content']
         assert selected in prompt
         assert 'Return the sum of two integers.' not in prompt
         assert 'DO_NOT_SEND_DEFECT_ANNOTATIONS' not in prompt
         assert 'cache_control' not in json.dumps(request)
     batch = repo / 'output/batches/fixture'
     manifest = json.loads((batch / 'manifest.json').read_text())
-    assert manifest['prd'] == prd and manifest['tag_cleanup_policy'] == 'documented-tags-v1'
+    assert manifest['prd'] == prd and manifest['tag_cleanup_policy'] == 'documented-tags-v2'
+    assert manifest['output_contract']['policy'] == 'text-only-final-v1'
+    assert all(r['messages'][0]['content'] == manifest['output_contract']['system_prompt'] for r in requests)
     summary = json.loads((batch / 'summary.json').read_text())
     assert len(summary) == 4 and all(row['prd'] == prd for row in summary)
     for model in ('Qwen3-Coder-30B', 'gpt-oss-20b'):
@@ -207,7 +209,7 @@ def test_batch_recovers_parser_error_and_continues_to_next_project(batch_repo, e
     assert result.returncode == 0, result.stdout + result.stderr
     assert len(requests) == 3
     assert requests[0]['model'] == requests[1]['model'] != requests[2]['model']
-    assert 'LM Studio could not parse the last model output.' in requests[1]['messages'][0]['content']
+    assert 'LM Studio could not parse the last model output.' in requests[1]['messages'][-1]['content']
     directory = repo / 'output/gpt-oss-20b/fixture/44-vanilla-direct-iter-0'
     state = json.loads((directory / 'run.json').read_text())
     assert state['status'] == 'passed' and state['repairs_used'] == 1

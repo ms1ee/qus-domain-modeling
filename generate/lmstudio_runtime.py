@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import signal
 from urllib.parse import urlsplit, urlunsplit
+from lmstudio_contract import SYSTEM_PROMPT
 
 
 HERE = Path(__file__).resolve().parent
@@ -102,7 +103,7 @@ class Runtime:
         return self.preflight(prompt)["tokens"]
 
     def preflight(self, prompt):
-        return self._call("count", prompt=prompt)
+        return self._call("count", prompt=prompt, system_prompt=SYSTEM_PROMPT)
 
     def prepare(self, exclusive=False):
         return self._call("prepare", exclusive=exclusive)

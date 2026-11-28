@@ -30,12 +30,12 @@ def test_local_provider_through_generation_and_unit_test(name, modeling, endpoin
         generate.log_gen_info(str(tmp_path), args, llm)
 
     assert len(requests) == (2 if modeling else 1)
-    assert all(prd in r['messages'][0]['content'] for r in requests)
+    assert all(prd in r['messages'][-1]['content'] for r in requests)
     if modeling:
         assert json.loads((run_dir / 'modeling.json').read_text()) == domain
-        assert 'Calculator' in requests[1]['messages'][0]['content']
-        assert generate.BENCHMARKS['44']['interface'] not in requests[0]['messages'][0]['content']
-    assert generate.BENCHMARKS['44']['interface'] in requests[-1]['messages'][0]['content']
+        assert 'Calculator' in requests[1]['messages'][-1]['content']
+        assert generate.BENCHMARKS['44']['interface'] not in requests[0]['messages'][-1]['content']
+    assert generate.BENCHMARKS['44']['interface'] in requests[-1]['messages'][-1]['content']
     assert (run_dir / 'src/subway_data.json').read_bytes() == (ROOT / 'benchmark/44/src/subway_data.json').read_bytes()
     assert 'PRIVATE_REASONING' not in (run_dir / 'codegen_response.txt').read_text()
     usage = json.loads((run_dir / 'usage.json').read_text())

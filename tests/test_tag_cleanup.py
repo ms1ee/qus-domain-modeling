@@ -20,7 +20,7 @@ def test_remove_only_standalone_tags_and_record_each_file():
     raw = block('def add(a,b): return a+b\n  </parameter>\n</invoke>\n')
     cleaned, audit = normalize(raw)
     assert cleaned == GOOD
-    assert audit['policy'] == 'documented-tags-v1' and audit['changed']
+    assert audit['policy'] == 'documented-tags-v2' and audit['changed']
     assert audit['raw_sha256'] == hashlib.sha256(raw.encode()).hexdigest()
     assert audit['cleaned_sha256'] == hashlib.sha256(GOOD.encode()).hexdigest()
     assert audit['files'] == [{'path': 'src/calculator.py', 'reopened_blocks': 0,
@@ -153,3 +153,59 @@ def test_incomplete_response_is_not_normalized_or_applied(tiny_benchmark, tmp_pa
     assert state['final_passed'] is None
     assert not (directory / 'rounds/000/tag_cleanup.json').exists()
     assert not (directory / 'src/calculator.py').exists()
+
+
+@pytest.mark.parametrize('suffix,count', [('\n</file>', 1), ('\n  </file>\r\n</file>\n', 2)])
+def test_only_redundant_terminal_closes_are_removed_and_audited(suffix, count):
+    raw = GOOD + suffix
+    cleaned, audit = normalize(raw)
+    assert cleaned == GOOD
+    assert audit['policy'] == 'documented-tags-v2' and audit['changed']
+    assert len(audit['removed_trailing_file_tags']) == count
+    assert all(row['tag'] == '</file>' for row in audit['removed_trailing_file_tags'])
+    assert audit['removed_trailing_file_tags'][0]['line'] == 4
+    assert normalize(cleaned)[0] == cleaned
+    assert not normalize(cleaned)[1]['changed']
+
+
+@pytest.mark.parametrize('raw', [
+    GOOD + '\n</file>\n' + block('VALUE = 1\n', 'src/other.py'),
+    GOOD + '\n</file>\nI forgot another file.',
+    GOOD + '</file>',
+    block('value = """\n</file>\n') + '\n</file>',
+    block('value = "unfinished\n') + '\n</file>',
+    '<file path="src/calculator.py">\n# literal </file>\n</file>',
+    '<file path="src/a.py">\ntext = """\n</file>\n'
+    '<file path="src/b.py">\n# """\nVALUE = 1\n</file>\n</file>',
+    block('value = 1\n</file path="src/calculator.py">\n') + '\n</file>',
+    block('plain text\n', 'src/message.txt') + '\n</file>',
+])
+def test_trailing_cleanup_never_guesses_ambiguous_file_boundaries(raw):
+    cleaned, audit = normalize(raw)
+    assert cleaned == raw and not audit['changed']
+    with pytest.raises(ResponseFormatError):
+        parse_changes(cleaned, current_files={}, protected_paths=set())
+
+
+@pytest.mark.parametrize('path', ['../escape.py', 'src/input.py'])
+def test_trailing_cleanup_preserves_path_and_provided_file_checks(path):
+    cleaned, audit = normalize(block('VALUE = 1\n', path) + '\n</file>')
+    assert audit['changed']
+    with pytest.raises(ResponseFormatError):
+        parse_changes(cleaned, current_files={}, protected_paths={'src/input.py'})
+
+
+def test_trailing_cleanup_applies_the_original_code_without_another_llm_request(tiny_benchmark, tmp_path):
+    expected = GOOD + '\n' + block('VALUE = 1\n', 'src/other.py')
+    raw = expected + '\n</file>'
+    model = FakeLLM([raw])
+    directory, state = execute(model, tmp_path, budget=0)
+    assert state['status'] == 'passed' and len(model.prompts) == 1
+    record = json.loads((directory / 'rounds/000/record.json').read_text())
+    assert record['tag_cleanup']['applied']
+    assert len(record['tag_cleanup']['removed_trailing_file_tags']) == 1
+    assert (directory / 'rounds/000/response.txt').read_text() == raw
+    assert (directory / 'rounds/000/cleaned_response.txt').read_text() == expected
+    assert (directory / 'src/calculator.py').read_text() == 'def add(a,b): return a+b\n'
+    assert (directory / 'src/other.py').read_text() == 'VALUE = 1\n'
+    assert state['repairs_used'] == 0

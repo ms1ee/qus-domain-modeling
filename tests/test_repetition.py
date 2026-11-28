@@ -42,12 +42,12 @@ def test_seed_is_stable_across_modeling_repairs_retries_and_old_usage_snapshots(
     assert first['status'] == second['status'] == 'passed'
     assert [r['seed'] for r in requests] == [44, 44, 44, 44, 45]
     assert requests[2] == requests[3], 'transport retries must preserve the request'
-    assert 'test_sum.py' not in requests[2]['messages'][0]['content']
-    history = section(requests[2]['messages'][0]['content'], 'RepairHistory')
+    assert 'test_sum.py' not in requests[2]['messages'][-1]['content']
+    history = section(requests[2]['messages'][-1]['content'], 'RepairHistory')
     assert len(history) == 1 and history[0]['round'] == 0
     assert history[0]['failed_items'] == {'1.1': 'fail'}
-    assert section(requests[1]['messages'][0]['content'], 'RepairHistory') == []
-    assert section(requests[4]['messages'][0]['content'], 'RepairHistory') == []
+    assert section(requests[1]['messages'][-1]['content'], 'RepairHistory') == []
+    assert section(requests[4]['messages'][-1]['content'], 'RepairHistory') == []
     assert first['identity']['seed'] == 44 and second['identity']['seed'] == 45
     assert first['settings']['sampling']['seed'] == 44
     assert first['rounds'][0]['usage'] == usage_before
@@ -111,10 +111,10 @@ def test_batch_reloads_between_repetitions_but_preserves_instance_inside_modelin
     assert [r['seed'] for r in requests] == [42, 42, 42, 43, 43, 43]
     assert len({r['model'] for r in requests[:3]}) == len({r['model'] for r in requests[3:]}) == 1
     assert requests[0]['model'] != requests[3]['model']
-    assert section(requests[1]['messages'][0]['content'], 'RepairHistory') == []
-    assert section(requests[4]['messages'][0]['content'], 'RepairHistory') == []
+    assert section(requests[1]['messages'][-1]['content'], 'RepairHistory') == []
+    assert section(requests[4]['messages'][-1]['content'], 'RepairHistory') == []
     for request in (requests[2], requests[5]):
-        assert len(section(request['messages'][0]['content'], 'RepairHistory')) == 1
+        assert len(section(request['messages'][-1]['content'], 'RepairHistory')) == 1
     summary = json.loads((repo / 'output/batches/fixture/summary.json').read_text())
     assert len(summary) == 2 and all(row['status'] == 'passed' for row in summary)
     assert all(row['repairs_used'] == 1 for row in summary)

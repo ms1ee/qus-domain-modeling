@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from config import MODELS, ROOT_DIR
 from lmstudio_runtime import Runtime, connection, load_profile
 from tag_cleanup import POLICY as TAG_CLEANUP_POLICY
+from lmstudio_contract import POLICY as OUTPUT_CONTRACT_POLICY, SYSTEM_PROMPT
 from experiment import DEFAULT_FEEDBACK_LEVEL, DEFAULT_SEED_BASE, seed_schedule, validate_feedback_level
 
 ROOT = Path(ROOT_DIR)
@@ -181,6 +182,7 @@ def execute(plan):
         save_json(batch / 'manifest.json', {**plan, 'started_at': timestamp(),
                   'model_reload_policy': 'per_trial',
                   'tag_cleanup_policy': TAG_CLEANUP_POLICY,
+                  'output_contract': {'policy': OUTPUT_CONTRACT_POLICY, 'system_prompt': SYSTEM_PROMPT},
                   'python': sys.executable, 'commit': commit.stdout.strip() if commit.returncode == 0 else None,
                   'working_tree_dirty': bool(dirty.stdout) if dirty.returncode == 0 else None,
                   'profiles': profiles})

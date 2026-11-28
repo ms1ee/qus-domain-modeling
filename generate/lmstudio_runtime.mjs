@@ -156,7 +156,11 @@ async function main() {
   validate(request.profile, state, request.identifier);
   if (request.action === 'inspect') return state;
   if (request.action === 'count') {
+    if (typeof request.system_prompt !== 'string' || !request.system_prompt.trim()) {
+      throw new Error('Missing text-only system contract for input token counting');
+    }
     const rendered = await model.applyPromptTemplate({messages: [
+      {role: 'system', content: [{type: 'text', text: request.system_prompt}]},
       {role: 'user', content: [{type: 'text', text: request.prompt}]}]});
     return {tokens: await model.countTokens(rendered), runtime: state};
   }
