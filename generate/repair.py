@@ -76,7 +76,7 @@ def finish_trial(run_dir, state, status, validation=None, error=None):
     return state
 
 
-def run_trial(llm, *, identity: dict, fixed: dict, run_dir: Path, max_repairs: int = 20,
+def run_trial(llm, *, identity: dict, fixed: dict, run_dir: Path, max_repairs: int = 10,
               state: dict | None = None) -> dict:
     if not 0 <= max_repairs <= 30:
         raise ValueError('max_repairs must be between 0 and 30')

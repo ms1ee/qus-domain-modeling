@@ -67,7 +67,7 @@ def build_prompt(fixed: dict, files: dict[str, str], validation: dict | None, hi
                  feedback_level=DEFAULT_FEEDBACK_LEVEL) -> str:
     validate_feedback_level(feedback_level)
     sections = [STATE_CODE_RULES,
-                f'Code request round {fixed.get("round", 0)}; repair limit {fixed.get("max_repairs", 20)}.',
+                f'Code request round {fixed.get("round", 0)}; repair limit {fixed.get("max_repairs", 10)}.',
                 '<PRD>\n' + fixed['prd'] + '\n</PRD>',
                 '<Interface>\n' + fixed['interface'] + '\n</Interface>']
     if fixed.get('domain_model'):

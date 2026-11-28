@@ -229,7 +229,7 @@ def execute(plan):
                                     command = [sys.executable, '-u', str(ROOT / 'generate/generate.py'),
                                                model, task, plan['prd'], str(plan['iters']), plan['run_name'],
                                                '--iteration-index', str(iteration),
-                                               '--max-repairs', str(plan.get('max_repairs', 20)),
+                                               '--max-repairs', str(plan.get('max_repairs', 10)),
                                                '--feedback-level', str(plan['feedback_level']),
                                                '--seed-base', str(plan['seed_base'])]
                                     if pipeline == 'modeling':
@@ -284,8 +284,8 @@ def main(argv=None):
     parser.add_argument('--prd', choices=PRD_VARIANTS, default='vanilla',
                         help='PRD variant for every selected project (default: vanilla)')
     parser.add_argument('--iters', type=int, default=3, help='Iterations per project/pipeline (default: 3)')
-    parser.add_argument('--max-repairs', type=int, default=20,
-                        help='Repair requests after initial generation per trial (default: 20; 0 allowed)')
+    parser.add_argument('--max-repairs', type=int, default=10,
+                        help='Repair requests after initial generation per trial (default: 10; 0 allowed)')
     parser.add_argument('--feedback-level', type=int, choices=(1, 2, 3), default=DEFAULT_FEEDBACK_LEVEL,
                         help='1: score (default); 2: score and item outcomes; 3: detailed failures; all include level-filtered repair history')
     parser.add_argument('--seed-base', type=int, default=DEFAULT_SEED_BASE,
